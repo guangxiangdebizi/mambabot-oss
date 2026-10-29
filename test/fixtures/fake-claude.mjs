@@ -38,6 +38,7 @@ function askPermission(toolName, input) {
   const requestId = randomUUID();
   out({ type: 'control_request', request_id: requestId, request: {
     subtype: 'can_use_tool', tool_name: toolName, input, description: 'echo hi', tool_use_id: 'toolu_1',
+    decision_reason: 'Process substitution requires manual approval', decision_reason_type: 'safetyCheck',
     permission_suggestions: [{ type: 'addRules', rules: [{ toolName }], behavior: 'allow', destination: 'localSettings' }],
   } });
   return new Promise((resolve) => pending.set(requestId, resolve));

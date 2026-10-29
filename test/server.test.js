@@ -253,6 +253,8 @@ test('tool approvals are surfaced and honoured (allow and deny)', async () => {
       if (ev.type === 'part' && ev.part.type === 'approval' && ev.part.state === 'pending') {
         assert.equal(ev.part.tool, 'Bash');
         assert.equal(ev.part.detail, 'echo hi');
+        assert.equal(ev.part.reason, 'Process substitution requires manual approval');
+        assert.equal(ev.part.safetyCheck, true);
         const res = await request(ctx.port, 'POST', `/api/conversations/${id}/approvals/${ev.part.id}`, { body: { decision }, cookie });
         assert.equal(res.status, 200);
         const again = await request(ctx.port, 'POST', `/api/conversations/${id}/approvals/${ev.part.id}`, { body: { decision }, cookie });

@@ -259,7 +259,7 @@ const PERM_OPTIONS = [
   ['manual', '逐条确认', '每个需要授权的操作都弹出卡片，由你允许或拒绝。最稳妥，也最费事。'],
   ['acceptEdits', '自动允许改文件', '读写、编辑文件直接放行；运行命令、联网等其他操作仍需你确认。'],
   ['auto', '自动判断', '由 Claude Code 判断风险：常规操作直接执行，拿不准的仍会弹卡片问你。'],
-  ['bypassPermissions', '完全放行', '所有操作直接执行，包括用 sudo 以 root 运行的命令，不再弹授权卡片。'],
+  ['bypassPermissions', '完全放行', '所有操作直接执行，包括用 sudo 以 root 运行的命令。只有 Claude Code 自带的少数安全检查（比如 cd 之后写文件、进程替换）仍会弹卡片，助理会尽量避开这些写法。'],
 ];
 
 function permissionSection() {

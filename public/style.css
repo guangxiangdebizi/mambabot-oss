@@ -319,6 +319,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .status-actions .btn { flex: none; }
 @media (prefers-reduced-motion: reduce) { .compact-note.running span { animation: none; } }
 
+.approval-reason { margin: 4px 0 8px; font-size: 13px; color: var(--text-2); }
+
 .msg-status { margin: 8px 0 0; font-size: 14px; color: var(--text-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .status-error { color: var(--danger); }
 .status-interrupted, .status-stopped { color: var(--text-2); }

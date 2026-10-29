@@ -1146,6 +1146,7 @@ function renderApproval(part, msg) {
   head.append(icon('shield', 18), el('span', '', part.state === 'pending' ? `需要你的授权：${toolLabel(part.tool)}` : `授权请求：${toolLabel(part.tool)}`));
   box.append(head);
   if (part.summary) box.append(el('p', 'approval-summary', part.summary));
+  if (part.reason) box.append(el('p', 'approval-reason', `${part.safetyCheck ? 'Claude Code 安全检查（任何权限模式下都会询问）' : '原因'}：${part.reason}`));
   box.append(el('pre', 'approval-detail', part.detail || ''));
   if (part.state === 'pending' && msg.status === 'running') {
     const actions = el('div', 'approval-actions');
