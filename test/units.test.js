@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { statSync } from 'node:fs';
 import { parseBlocks, parseInline, safeHref } from '../public/markdown.js';
 import { LoginLimiter, checkHost, checkOrigin, hashPassword, verifyPassword } from '../src/auth.js';
 import { StreamTranslator, approvalDetail, summarizeTool } from '../src/stream.js';
@@ -171,3 +172,39 @@ test('handoff: generic lines, browser lines only with a browser, host notes appe
   assert.match(text, /browseros-neo/);
   assert.match(text, /这台机器的说明\n当前权限模式：auto/);
 });
+
+test('browser: an Xvfb left behind by this app is reclaimed, a foreign one is not', { skip: !existsSyncSafe('/usr/bin/Xvfb') && 'Xvfb not installed' }, async () => {
+  const { spawn } = await import('node:child_process');
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { existsSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { BrowserManager } = await import('../src/browser.js');
+  const root = await mkdtemp(join(tmpdir(), 'aw-xvfb-'));
+  const quiet = { info() {}, warn() {}, error() {} };
+  const display = 187;
+  const bm = new BrowserManager({ cfg: { dataDir: root, browserDisplay: display }, log: quiet });
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(bm.dir, { recursive: true });
+  await writeFile(bm.xauth, '');
+  const startX = async (auth) => {
+    const c = spawn('Xvfb', [`:${display}`, '-nolisten', 'tcp', '-auth', auth], { stdio: 'ignore' });
+    for (let i = 0; i < 50 && !existsSync(`/tmp/.X${display}-lock`); i += 1) await new Promise((r) => setTimeout(r, 100));
+    return c;
+  };
+  try {
+    const foreign = await startX(join(root, 'other-auth'));
+    assert.equal(await bm.reclaimDisplay(display), false, 'not ours');
+    foreign.kill('SIGTERM');
+    for (let i = 0; i < 50 && existsSync(`/tmp/.X${display}-lock`); i += 1) await new Promise((r) => setTimeout(r, 100));
+    await startX(bm.xauth);
+    assert.equal(await bm.reclaimDisplay(display), true, 'ours, left behind');
+    assert.equal(existsSync(`/tmp/.X${display}-lock`), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function existsSyncSafe(p) {
+  try { return statSync(p).isFile(); } catch { return false; }
+}

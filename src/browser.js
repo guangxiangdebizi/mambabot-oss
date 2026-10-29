@@ -183,7 +183,7 @@ export class BrowserManager extends EventEmitter {
   async startXvfb() {
     const n = this.cfg.browserDisplay;
     if (this.pids.xvfb && this.alive(this.pids.xvfb)) return;
-    if (existsSync(`/tmp/.X${n}-lock`)) throw new Error(`显示器 ${this.display} 已被占用`);
+    if (existsSync(`/tmp/.X${n}-lock`) && !(await this.reclaimDisplay(n))) throw new Error(`显示器 ${this.display} 已被占用`);
     const cookie = randomBytes(16).toString('hex');
     await rm(this.xauth, { force: true });
     await run('xauth', ['-f', this.xauth, 'add', this.display, '.', cookie]);
@@ -194,6 +194,31 @@ export class BrowserManager extends EventEmitter {
     this.pids.xvfb = child.pid;
     for (let i = 0; i < 40 && !existsSync(`/tmp/.X11-unix/X${n}`); i += 1) await sleep(100);
     if (!existsSync(`/tmp/.X11-unix/X${n}`)) throw new Error('虚拟显示器没有启动');
+  }
+
+  /**
+   * A display lock left behind by this app (an Xvfb using our Xauthority file, e.g. after the
+   * server lost its pid file) or by a process that no longer exists is reclaimed; a display
+   * used by anything else is left alone. Returns true when the display is free.
+   */
+  async reclaimDisplay(n) {
+    const lock = `/tmp/.X${n}-lock`;
+    const pid = Number((await readFile(lock, 'utf8').catch(() => '')).trim());
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    let argv;
+    try {
+      argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
+    } catch {
+      this.log.warn(`清理失效的显示器锁 ${this.display}（进程 ${pid} 已不存在）`);
+      await rm(lock, { force: true });
+      await rm(`/tmp/.X11-unix/X${n}`, { force: true });
+      return true;
+    }
+    if (!/(^|\/)Xvfb$/.test(argv[0]) || !argv.includes(this.xauth)) return false;
+    this.log.warn(`回收本服务遗留的虚拟显示器 ${this.display} pid=${pid}`);
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+    for (let i = 0; i < 50 && existsSync(lock); i += 1) await sleep(100);
+    return !existsSync(lock);
   }
 
   async startBrowser() {
