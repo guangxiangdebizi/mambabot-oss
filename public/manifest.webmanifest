@@ -1,0 +1,9 @@
+{
+  "name": "MambaBot",
+  "short_name": "MambaBot",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f6f4",
+  "theme_color": "#0f6b62",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

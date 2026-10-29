@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Secrets and credentials (the app keeps these outside the source tree; never commit copies)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+id_ed25519*
+auth.json
+initial-login-secret
+sessions.json
+.credentials.json
+**/.claude/
+
+# Runtime data: conversations, uploads, logs, browser profiles
+data/
+runtime/
+uploads/
+conversations/
+logs/
+*.log
+*-profile/
+browser-profile*/
+Xauthority
+*.xauth
+
+# Local research artifacts, screenshots and scratch output
+research/
+screenshots/
+!docs/screenshots/
+artifacts/
+test-results/
+*.png
+!public/**/*.png
+!docs/screenshots/*.png
+*.tmp
+.DS_Store

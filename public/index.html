@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <title>MambaBot</title>
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#212121" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div id="boot" class="boot" role="status">加载中…</div>
+
+  <main id="login-view" class="login" hidden>
+    <form id="login-form" class="login-card" novalidate>
+      <img src="/icon.svg" alt="" width="40" height="40" class="login-logo">
+      <h1 class="login-title">MambaBot</h1>
+      <p class="login-hint">请输入登录密钥继续。</p>
+      <label for="password" class="field-label">登录密钥</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required spellcheck="false">
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+      <button id="login-submit" type="submit" class="btn btn-primary btn-block">登录</button>
+    </form>
+  </main>
+
+  <div id="app-view" class="app" hidden>
+    <aside id="sidebar" class="sidebar" aria-label="侧边栏">
+      <div class="sb-head">
+        <button id="sb-collapse" type="button" class="icon-btn" aria-label="收起侧边栏" data-tip="收起侧边栏" data-icon="sidebar"></button>
+        <button id="sb-new" type="button" class="icon-btn" aria-label="新对话" data-tip="新对话" data-icon="compose"></button>
+      </div>
+      <div class="sb-actions">
+        <button id="new-chat" type="button" class="sb-row" data-icon-lead="compose"><span>新对话</span></button>
+        <div class="sb-search">
+          <span class="sb-search-icon" data-icon="search" aria-hidden="true"></span>
+          <label for="search" class="sr-only">搜索对话</label>
+          <input id="search" type="search" placeholder="搜索标题和内容" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <nav class="conv-nav" aria-label="历史对话">
+        <p id="conv-empty" class="conv-empty" hidden>还没有对话</p>
+        <div id="conv-groups"></div>
+      </nav>
+      <div class="sb-foot">
+        <button id="open-tasks" type="button" class="sb-row" data-icon-lead="clock"><span>定时任务</span></button>
+        <button id="open-settings" type="button" class="sb-row" data-icon-lead="settings"><span>用量与设置</span></button>
+        <button id="theme" type="button" class="sb-row" data-icon-lead="theme"><span id="theme-label">主题：跟随系统</span></button>
+        <button id="logout" type="button" class="sb-row" data-icon-lead="logout"><span>退出登录</span></button>
+      </div>
+    </aside>
+    <div id="sb-resize" class="resizer" role="separator" aria-orientation="vertical" aria-controls="sidebar" aria-label="调整侧边栏宽度（拖动或用左右方向键，双击恢复默认）" tabindex="0"></div>
+    <div id="scrim" class="scrim" hidden></div>
+
+    <section class="chat" aria-label="对话">
+      <header class="topbar">
+        <button id="menu" type="button" class="icon-btn menu-btn" aria-label="打开侧边栏" aria-controls="sidebar" aria-expanded="false" data-icon="sidebar"></button>
+        <button id="top-new" type="button" class="icon-btn top-new" aria-label="新对话" data-icon="compose"></button>
+        <button id="model-btn" type="button" class="model-btn" aria-haspopup="dialog" aria-controls="model-pop" aria-expanded="false">
+          <span id="model-btn-name" class="model-btn-name">选择模型</span>
+          <span id="model-btn-effort" class="model-btn-effort"></span>
+          <span class="model-btn-caret" data-icon="chevron-down" aria-hidden="true"></span>
+        </button>
+        <h1 id="chat-title" class="chat-title sr-only">新对话</h1>
+        <div class="topbar-spacer"></div>
+        <button id="browser-btn" type="button" class="top-chip" aria-controls="browser-panel" aria-expanded="false">
+          <span data-icon="globe" aria-hidden="true"></span><span class="top-chip-text">浏览器</span><span id="browser-dot" class="dot" hidden></span>
+        </button>
+        <button id="conv-menu-btn" type="button" class="icon-btn" aria-label="对话选项" aria-haspopup="menu" data-icon="more" hidden></button>
+      </header>
+
+      <div id="banner" class="banner" role="status" hidden></div>
+
+      <div id="scroller" class="scroller">
+        <div id="messages" class="messages"></div>
+      </div>
+
+      <div class="composer-wrap">
+        <button id="jump" type="button" class="jump" aria-label="跳到最新消息" data-icon="arrow-down" hidden></button>
+        <div id="slash-pop" class="slash-pop" role="listbox" aria-label="指令" hidden></div>
+        <form id="composer" class="composer" novalidate>
+          <div id="attach-list" class="attach-list" hidden></div>
+          <label for="input" class="sr-only">消息</label>
+          <textarea id="input" rows="1" placeholder="给 MambaBot 发消息" autocomplete="off" enterkeyhint="send"></textarea>
+          <div class="composer-bar">
+            <button id="attach-btn" type="button" class="icon-btn round" aria-label="更多功能：上传、指令、浏览器、定时任务、用量" aria-haspopup="menu" aria-expanded="false" data-tip="上传、指令、浏览器、定时任务、用量" data-icon="plus"></button>
+            <input id="file-input" type="file" multiple hidden>
+            <span id="composer-model" class="composer-model" aria-live="polite"></span>
+            <button id="perm-chip" type="button" class="perm-chip" hidden></button>
+            <div class="composer-spacer"></div>
+            <button id="send" type="submit" class="send-btn" aria-label="发送" data-icon="arrow-up" disabled></button>
+            <button id="stop" type="button" class="send-btn stop" aria-label="停止生成" data-icon="stop" hidden></button>
+          </div>
+        </form>
+        <p id="composer-error" class="composer-error" role="alert" hidden></p>
+        <p class="composer-hint">Enter 发送，Shift + Enter 换行。回复可能有误，请核对重要信息。</p>
+      </div>
+    </section>
+
+    <div id="bp-resize" class="resizer" role="separator" aria-orientation="vertical" aria-controls="browser-panel" aria-label="调整浏览器面板宽度（拖动或用左右方向键，双击恢复默认）" tabindex="0"></div>
+    <aside id="browser-panel" class="bpanel" aria-labelledby="bp-heading" hidden>
+      <div class="bp-head">
+        <button id="bp-back" type="button" class="bp-back" data-icon-lead="back"><span>返回对话</span></button>
+        <h2 id="bp-heading" class="bp-heading">浏览器</h2>
+        <span id="bp-status" class="bp-pill" role="status"></span>
+        <div class="topbar-spacer"></div>
+        <button id="bp-fit" type="button" class="icon-btn" aria-label="原始大小" title="原始大小（可拖动查看）" data-icon="expand"></button>
+        <button id="bp-power" type="button" class="icon-btn" aria-label="关闭浏览器" title="关闭浏览器（释放内存）" data-icon="power"></button>
+        <button id="bp-close" type="button" class="icon-btn bp-close" aria-label="收起浏览器面板" title="收起" data-icon="x"></button>
+      </div>
+      <div id="bp-help" class="bp-help" hidden>
+        <span class="bp-help-icon" data-icon="hand" aria-hidden="true"></span>
+        <div class="bp-help-text">
+          <p id="bp-help-reason" class="bp-help-reason"></p>
+          <p id="bp-help-details" class="bp-help-details"></p>
+        </div>
+      </div>
+      <div id="bp-screen" class="bp-screen">
+        <div id="bp-canvas" class="bp-canvas"></div>
+        <div id="bp-overlay" class="bp-overlay">
+          <p id="bp-overlay-text" class="bp-overlay-text"></p>
+          <button id="bp-overlay-btn" type="button" class="btn btn-primary" hidden></button>
+        </div>
+      </div>
+      <div id="bp-typebar" class="bp-typebar" hidden>
+        <label for="bp-type" class="sr-only">输入到浏览器</label>
+        <input id="bp-type" type="text" placeholder="输入文字发送到浏览器" autocomplete="off" spellcheck="false">
+        <button id="bp-type-send" type="button" class="btn btn-ghost btn-sm">发送</button>
+        <button id="bp-key-enter" type="button" class="btn btn-ghost btn-sm" aria-label="回车键">回车</button>
+        <button id="bp-key-back" type="button" class="btn btn-ghost btn-sm" aria-label="退格键">退格</button>
+      </div>
+      <div class="bp-foot">
+        <p id="bp-foot-text" class="bp-foot-text"></p>
+        <button id="bp-action" type="button" class="btn btn-primary btn-sm"></button>
+      </div>
+    </aside>
+  </div>
+
+  <div id="model-pop" class="popover model-pop" role="dialog" aria-modal="false" aria-labelledby="model-pop-title" hidden>
+    <div class="pop-head">
+      <h2 id="model-pop-title" class="pop-title">模型</h2>
+      <button id="model-refresh" type="button" class="link-btn">刷新列表</button>
+    </div>
+    <div id="model-list" class="model-list" role="radiogroup" aria-label="模型"></div>
+    <button id="model-more" type="button" class="model-more" aria-expanded="false">
+      <span>更多版本</span><span data-icon="chevron-down" aria-hidden="true"></span>
+    </button>
+    <div id="model-list-more" class="model-list" role="radiogroup" aria-label="更多模型版本" hidden></div>
+    <div class="effort-box">
+      <div class="effort-head">
+        <span id="effort-label" class="pop-sub">推理强度</span>
+        <span id="effort-hint" class="effort-hint"></span>
+      </div>
+      <div id="effort-seg" class="seg" role="radiogroup" aria-labelledby="effort-label"></div>
+    </div>
+    <p id="model-timing" class="model-timing" hidden></p>
+  </div>
+
+  <div id="menu-pop" class="popover menu-pop" role="menu" hidden></div>
+  <div id="pop-scrim" class="pop-scrim" hidden></div>
+
+  <dialog id="rename-dialog" class="dialog">
+    <form method="dialog" id="rename-form">
+      <h2 class="dialog-title">重命名对话</h2>
+      <label for="rename-input" class="sr-only">标题</label>
+      <input id="rename-input" maxlength="80" required autocomplete="off">
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" value="cancel" id="rename-cancel">取消</button>
+        <button type="submit" class="btn btn-primary" value="ok">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="confirm-dialog" class="dialog">
+    <form method="dialog">
+      <h2 id="confirm-title" class="dialog-title">删除对话？</h2>
+      <p id="confirm-text" class="dialog-text"></p>
+      <div class="dialog-actions">
+        <button type="submit" class="btn btn-ghost" value="cancel">取消</button>
+        <button type="submit" class="btn btn-danger" value="ok" id="confirm-ok">删除</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="settings-dialog" class="dialog sheet" aria-labelledby="settings-title">
+    <div class="sheet-head">
+      <h2 id="settings-title" class="dialog-title">用量与设置</h2>
+      <button type="button" class="icon-btn" data-close aria-label="关闭" data-icon="x"></button>
+    </div>
+    <div id="settings-body" class="sheet-body"></div>
+  </dialog>
+  <dialog id="tasks-dialog" class="dialog sheet" aria-labelledby="tasks-title">
+    <div class="sheet-head">
+      <h2 id="tasks-title" class="dialog-title">定时任务</h2>
+      <button type="button" class="icon-btn" data-close aria-label="关闭" data-icon="x"></button>
+    </div>
+    <div id="tasks-body" class="sheet-body"></div>
+  </dialog>
+  <dialog id="status-dialog" class="dialog sheet" aria-labelledby="status-title">
+    <div class="sheet-head">
+      <h2 id="status-title" class="dialog-title">上下文与花费</h2>
+      <button type="button" class="icon-btn" data-close aria-label="关闭" data-icon="x"></button>
+    </div>
+    <div id="status-body" class="sheet-body"></div>
+  </dialog>
+  <dialog id="image-viewer" class="viewer" aria-label="查看图片">
+    <div class="viewer-bar">
+      <span id="viewer-name" class="viewer-name"></span>
+      <a id="viewer-open" class="link-btn" target="_blank" rel="noopener">原图</a>
+      <button type="button" class="icon-btn" data-close aria-label="关闭" data-icon="x"></button>
+    </div>
+    <img id="viewer-img" alt="">
+  </dialog>
+  <dialog id="share-dialog" class="dialog share-dialog" aria-labelledby="share-title">
+    <h2 id="share-title" class="dialog-title">分享对话</h2>
+    <div id="share-body"></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="live" class="sr-only" aria-live="polite"></div>
+</body>
+</html>

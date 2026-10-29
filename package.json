@@ -1,0 +1,14 @@
+{
+  "name": "assistant-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MambaBot: a private, phone-friendly web interface for Claude Code on your own server",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  }
+}
