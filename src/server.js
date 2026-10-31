@@ -101,7 +101,7 @@ const summary = (conv, runs) => ({
 function messageExcerpt(conv, q) {
   for (const m of conv.messages) {
     for (const p of m.parts || []) {
-      if (p.type !== 'text' || !p.text) continue;
+      if ((p.type !== 'text' && p.type !== 'followup') || !p.text) continue;
       const text = p.text.replace(/\s+/g, ' ');
       const i = text.toLowerCase().indexOf(q);
       if (i < 0) continue;
@@ -297,8 +297,8 @@ export async function createApp(cfg = loadConfig(), log = console) {
     return p.id;
   }
 
-  async function postMessage(req, res, conv) {
-    const body = await readBody(req);
+  /** Text and uploaded files of a message the owner sends. */
+  async function readInput(body) {
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     const ids = Array.isArray(body.attachments) ? body.attachments.filter((x) => typeof x === 'string') : [];
     if (!text && !ids.length) throw new HttpError(400, '消息不能为空');
@@ -307,6 +307,12 @@ export async function createApp(cfg = loadConfig(), log = console) {
     const files = ids.map((id) => uploads.get(id));
     if (files.some((f) => !f)) throw new HttpError(400, '附件不存在，请重新上传');
     for (const f of files) if (!(await uploads.exists(f))) throw new HttpError(400, `附件 ${f.name} 已丢失，请重新上传`);
+    return { text, files };
+  }
+
+  async function postMessage(req, res, conv) {
+    const body = await readBody(req);
+    const { text, files } = await readInput(body);
     preflight(conv);
     const parentId = parentFor(conv, body.parentId);
     const plan = resumePlan(conv, parentId);
@@ -327,6 +333,21 @@ export async function createApp(cfg = loadConfig(), log = console) {
     const { assistantMessage, run } = await startTurn(conv, { parentId, userMessage, content, sel, resume: plan.resume });
     await store.saveNow(conv);
     return sendJson(res, 201, { userMessage, assistantMessage, leafId: conv.leafId, run: { id: run.id, seq: run.seq, messageId: assistantMessage.id } });
+  }
+
+  /** A message sent while a reply runs, added to that reply's turn as in the Claude Code terminal. */
+  async function postFollowup(req, res, conv) {
+    const NOT_RUNNING = '这条回复已经结束，请直接发送';
+    if (!runs.isRunning(conv.id)) throw new HttpError(409, NOT_RUNNING);
+    const { text, files } = await readInput(await readBody(req));
+    if (COMPACT_RE.test(text)) throw new HttpError(400, '压缩上下文要等当前回复结束');
+    const entry = {
+      id: crypto.randomUUID(), text, attachments: files.map((f) => uploads.publicView(f)), createdAt: new Date().toISOString(),
+    };
+    const content = await uploads.buildContent(text, files);
+    if (!runs.followup(conv.id, entry, content)) throw new HttpError(409, NOT_RUNNING);
+    await store.saveNow(conv);
+    return sendJson(res, 201, { followup: entry });
   }
 
   /** A new reply to an existing user message, as a sibling of the earlier replies. */
@@ -726,7 +747,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       return sendJson(res, 200, { shares: shares.list() });
     }
 
-    const m = path.match(/^\/api\/conversations\/([^/]+)(?:\/(messages|regenerate|stop|events|approvals|share|status)(?:\/([^/]+))?)?$/);
+    const m = path.match(/^\/api\/conversations\/([^/]+)(?:\/(messages|followups|regenerate|stop|events|approvals|share|status)(?:\/([^/]+))?)?$/);
     if (!m || !ID_RE.test(m[1])) throw new HttpError(404, '接口不存在');
     const conv = store.get(m[1]);
     if (!conv) throw new HttpError(404, '对话不存在');
@@ -762,6 +783,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       }
     }
     if (action === 'messages' && method === 'POST') return postMessage(req, res, conv);
+    if (action === 'followups' && method === 'POST') return postFollowup(req, res, conv);
     if (action === 'events' && method === 'GET') return streamEvents(req, res, conv, url);
     if (action === 'stop' && method === 'POST') {
       if (!runs.stop(conv.id)) throw new HttpError(409, '没有正在进行的回复');

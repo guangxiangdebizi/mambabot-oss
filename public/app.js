@@ -702,6 +702,8 @@ function applyEvent(ev) {
   } else if (ev.type === 'meta') {
     if (ev.modelUsed) msg.modelUsed = ev.modelUsed;
     if (ev.usage) msg.usage = ev.usage;
+    if (ev.queued) msg.queued = ev.queued;
+    if (ev.background !== undefined) msg.background = ev.background;
   } else if (ev.type === 'status') {
     msg.status = ev.status;
     if (ev.error) msg.error = ev.error;
@@ -757,16 +759,21 @@ function updateChrome() {
   ui.title.textContent = conv?.title || (conv && state.loading ? '加载中…' : '新对话');
   document.title = conv?.title ? `${conv.title} · MambaBot` : 'MambaBot';
   const live = isLive();
-  ui.send.hidden = live;
-  ui.stop.hidden = !live;
+  const uploading = state.attachments.some((a) => a.status === 'uploading');
+  const hasContent = ui.input.value.trim() || state.attachments.some((a) => a.status === 'ready');
+  // One button: while a reply runs it stops it when the composer is empty, and otherwise
+  // sends the text into the running turn (as in the Claude Code terminal).
+  const showStop = live && !ui.input.value.trim() && !state.attachments.length;
+  ui.stop.hidden = !showStop;
+  ui.send.hidden = showStop;
+  ui.input.placeholder = live ? '补充或纠正，会在当前步骤完成后交给 Claude' : '给 MambaBot 发消息';
+  ui.send.setAttribute('aria-label', live ? '追加到当前任务' : '发送');
   const stopping = runMessage()?.status === 'stopping';
   ui.stop.disabled = stopping;
   ui.stop.setAttribute('aria-label', stopping ? '正在停止' : '停止生成');
-  const uploading = state.attachments.some((a) => a.status === 'uploading');
-  const hasContent = ui.input.value.trim() || state.attachments.some((a) => a.status === 'ready');
   ui.send.disabled = state.sending || state.loading || uploading || !hasContent
     || state.attachments.some((a) => a.status === 'error') || !state.models.length;
-  ui.send.title = uploading ? '附件上传中…' : '发送';
+  ui.send.title = uploading ? '附件上传中…' : (live ? '追加到当前任务' : '发送');
   ui.convMenuBtn.hidden = !conv || state.loading;
 }
 
@@ -1045,9 +1052,12 @@ function fillAssistant(node, msg) {
       body.append(compactNote(part));
     } else if (part.type === 'file' && part.attachment) {
       body.append(shownFile(part));
+    } else if (part.type === 'followup') {
+      body.append(followupView(part));
     }
   });
   flushTools(live);
+  for (const q of msg.queued || []) body.append(followupView(q, true));
   node.append(body);
 
   const status = renderStatus(msg);
@@ -1071,6 +1081,30 @@ function fillAssistant(node, msg) {
   const badge = modelBadge(msg);
   if (badge) actions.append(badge);
   node.append(actions);
+}
+
+/** A message the owner added while this reply ran: queued, seen by Claude, or never delivered. */
+function followupView(part, queued = false) {
+  const box = el('div', `followup${queued ? ' queued' : ''}${part.undelivered ? ' undelivered' : ''}`);
+  if (part.attachments?.length) {
+    const files = el('div', 'user-attach');
+    for (const a of part.attachments) files.append(attachmentView(a));
+    box.append(files);
+  }
+  if (part.text) box.append(el('div', 'bubble', part.text));
+  if (queued) box.append(el('div', 'followup-note', '排队中 · 当前步骤完成后交给 Claude'));
+  if (part.undelivered) {
+    const note = el('div', 'followup-note', '未送达：回复在这条消息送达前已结束');
+    if (part.text) {
+      const b = el('button', 'link-btn', '放回输入框');
+      b.type = 'button';
+      b.dataset.action = 'refill';
+      b.dataset.text = part.text;
+      note.append(b);
+    }
+    box.append(note);
+  }
+  return box;
 }
 
 function handoffCard(part, msg) {
@@ -1176,6 +1210,7 @@ function renderStatus(msg) {
     case 'running':
       if (waiting) { p.textContent = '等待你的授权…'; break; }
       if (browserSnapshot().help?.convId === state.conv?.id) { p.textContent = '等待你在浏览器中操作…'; break; }
+      if (msg.background) { p.textContent = `等待 ${msg.background} 个后台任务 · 可以继续发消息`; break; }
       if (msg.parts.length) return null;
       p.append(thinkingDots(), el('span', 'sr-only', '正在思考'));
       break;
@@ -1234,9 +1269,10 @@ function afterStart(res) {
 async function send() {
   const text = ui.input.value.trim();
   const ready = state.attachments.filter((a) => a.status === 'ready');
-  if ((!text && !ready.length) || state.sending || isLive()) return;
+  if ((!text && !ready.length) || state.sending) return;
   if (state.attachments.some((a) => a.status === 'uploading')) { setError(ui.composerError, '附件还在上传，请稍候'); return; }
   setError(ui.composerError, '');
+  if (isLive()) { sendFollowup(text, ready); return; }
   state.sending = true;
   updateChrome();
   try {
@@ -1253,6 +1289,34 @@ async function send() {
     state.conv.messages.push(res.userMessage, res.assistantMessage);
     if (!state.conv.title) state.conv.title = (text || ready[0]?.name || '').slice(0, 40);
     afterStart(res);
+  } catch (err) {
+    if (err.status !== 401) setError(ui.composerError, err.message);
+  } finally {
+    state.sending = false;
+    updateChrome();
+  }
+}
+
+/** Adds to the running reply; Claude Code picks it up after the step it is on. */
+async function sendFollowup(text, ready) {
+  const convId = state.conv.id;
+  const msgId = state.run.messageId;
+  state.sending = true;
+  updateChrome();
+  try {
+    const { followup } = await api(`/api/conversations/${convId}/followups`, {
+      method: 'POST', body: { text, attachments: ready.map((a) => a.id) },
+    });
+    if (state.conv?.id !== convId) return;
+    ui.input.value = '';
+    clearAttachments();
+    autosize();
+    // The stream usually reports it too; whichever comes first shows it.
+    const msg = byId().get(msgId);
+    if (msg && !msg.queued?.some((q) => q.id === followup.id) && !msg.parts.some((p) => p.id === followup.id)) {
+      msg.queued = [...(msg.queued || []), followup];
+      scheduleMessageRender(msg);
+    }
   } catch (err) {
     if (err.status !== 401) setError(ui.composerError, err.message);
   } finally {
@@ -1478,7 +1542,7 @@ ui.input.addEventListener('input', autosize);
 ui.input.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229 || coarse.matches) return;
   e.preventDefault();
-  if (!ui.send.disabled && !isLive()) send();
+  if (!ui.send.disabled) send();
 });
 ui.input.addEventListener('paste', (e) => {
   const files = [...(e.clipboardData?.files || [])];
@@ -1569,6 +1633,7 @@ ui.messages.addEventListener('click', (e) => {
   else if (action === 'regenerate') regenerate(id);
   else if (action === 'branch') switchBranch(id, Number(btn.dataset.dir));
   else if (action === 'open-browser') openBrowser();
+  else if (action === 'refill') setComposer(btn.dataset.text || '');
 });
 ui.scroller.addEventListener('scroll', () => {
   const d = distanceFromBottom();

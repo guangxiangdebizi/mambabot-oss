@@ -240,6 +240,7 @@ export async function exportMarkdown(id) {
       else if (p.type === 'file' && p.attachment) out.push(`> 展示的文件：${p.attachment.name}${p.caption ? `（${p.caption}）` : ''}`, '');
       else if (p.type === 'compact' && p.state === 'done') out.push('*（上下文已压缩）*', '');
       else if (p.type === 'notice') out.push(`> ${p.text}`, '');
+      else if (p.type === 'followup') out.push(`**我（追加${p.undelivered ? '，未送达' : ''}）：** ${p.text || ''}`, '');
     }
     if (m.error) out.push(`> ${m.error}`, '');
   }

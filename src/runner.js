@@ -4,6 +4,9 @@ import { StreamTranslator, approvalDetail, summarizeTool } from './stream.js';
 
 const RECENT_KEEP_MS = 2 * 60 * 1000;
 const STDERR_KEEP = 2000;
+// After the last background task ends Claude Code normally starts a turn for its notification;
+// if none starts within this time the reply is over.
+const BACKGROUND_SETTLE_MS = 15 * 1000;
 
 // Appended to Claude's system prompt on every web run. Facts about one particular host
 // (machine, other sessions, SSH aliases, sudo) belong in `<configDir>/handoff.md`, which is
@@ -72,6 +75,11 @@ export class RunManager {
     const run = {
       id: runId, conv, msg: message, seq: 0, events: [], listeners: new Set(),
       approvals: new Map(), stopRequested: false, finished: false, stderr: '', killTimers: [],
+      // uuids of the user messages written to this process; their replays are not transcript tails.
+      sent: new Set(), inputClosed: false,
+      // Between turns (after a result) and the background tasks Claude left running: while any
+      // run, Claude Code wakes the reply up again when they finish, so input stays open.
+      idle: false, background: 0, settleTimer: null,
     };
     run.translator = new StreamTranslator(message, (ev) => this.emit(run, ev));
     this.active.set(conv.id, run);
@@ -81,6 +89,8 @@ export class RunManager {
       ...this.cfg.claudePrefixArgs,
       '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
       '--include-partial-messages',
+      // Echoes each user message when Claude Code takes it in: the delivery signal for follow-ups.
+      '--replay-user-messages',
       // Normal approval behaviour: anything that would prompt in a terminal is sent to the owner.
       '--permission-mode', mode, '--permission-prompt-tool', 'stdio',
       // Session-scoped cron dies with this one-reply process; scheduled work uses assistant-tasks.
@@ -123,9 +133,7 @@ export class RunManager {
     child.on('close', (code, signal) => this.finish(run, code, signal));
 
     this.send(run, { type: 'control_request', request_id: `init_${run.id}`, request: { subtype: 'initialize', hooks: null } });
-    this.send(run, {
-      type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: 'default',
-    });
+    this.sendUser(run, randomUUID(), content);
     this.log.info(`回复开始 conv=${conv.id} run=${run.id} pid=${child.pid ?? '-'}`);
     return run;
   }
@@ -153,6 +161,35 @@ export class RunManager {
     if (!run || run.finished || run.stopRequested) return false;
     run.translator.pushPart({ type: 'file', ...file });
     return true;
+  }
+
+  /**
+   * A message typed while the reply is running. As in the Claude Code terminal, the CLI adds it
+   * to the turn after the current step (or starts one more turn if the reply already ended).
+   * False once the process can no longer take input.
+   */
+  followup(convId, entry, content) {
+    const run = this.active.get(convId);
+    if (!run || run.finished || run.stopRequested || run.terminated || run.inputClosed) return false;
+    run.msg.queued = [...(run.msg.queued || []), entry];
+    this.emit(run, { type: 'meta', queued: run.msg.queued });
+    this.sendUser(run, entry.id, content);
+    return true;
+  }
+
+  sendUser(run, uuid, content) {
+    run.sent.add(uuid);
+    this.send(run, { type: 'user', uuid, message: { role: 'user', content }, parent_tool_use_id: null, session_id: 'default' });
+  }
+
+  /** Claude Code took a queued follow-up in: it moves into the reply where Claude saw it. */
+  delivered(run, uuid) {
+    const queued = run.msg.queued || [];
+    const entry = queued.find((q) => q.id === uuid);
+    if (!entry) return;
+    run.msg.queued = queued.filter((q) => q !== entry);
+    run.translator.pushPart({ type: 'followup', ...entry });
+    this.emit(run, { type: 'meta', queued: run.msg.queued });
   }
 
   send(run, obj) {
@@ -186,12 +223,43 @@ export class RunManager {
       if (m.response?.request_id === `init_${run.id}`) this.catalog?.update(m.response.response?.models);
       return undefined;
     }
+    if (m.type === 'user' && m.isReplay && run.sent.has(m.uuid)) return this.delivered(run, m.uuid);
     run.translator.handle(m);
-    if (m.type === 'result') {
-      // Stream-json input keeps the process alive for more turns; one reply per process.
-      run.child.stdin.end();
+    if (m.type === 'system' && m.subtype === 'init') {
+      run.idle = false;
+      this.noteWaiting(run);
+    } else if (m.type === 'system' && m.subtype === 'background_tasks_changed') {
+      run.background = Array.isArray(m.tasks) ? m.tasks.length : 0;
+      this.noteWaiting(run);
+      if (!run.background && run.idle) {
+        clearTimeout(run.settleTimer);
+        run.settleTimer = setTimeout(() => this.closeInputIfDone(run), BACKGROUND_SETTLE_MS);
+      }
+    } else if (m.type === 'result') {
+      run.idle = true;
+      this.noteWaiting(run);
+      this.closeInputIfDone(run);
     }
     return undefined;
+  }
+
+  /**
+   * Stream-json input keeps the process alive for more turns; one reply per process, which ends
+   * after a result once no follow-up waits for its turn and no background task can wake it up.
+   */
+  closeInputIfDone(run) {
+    if (!run.idle || run.inputClosed || run.msg.queued?.length || run.background) return;
+    run.inputClosed = true;
+    run.child.stdin.end();
+  }
+
+  /** Tells the page the reply is waiting on background tasks (and still takes messages). */
+  noteWaiting(run) {
+    const background = run.idle ? run.background : 0;
+    if ((run.msg.background || 0) === background) return;
+    if (background) run.msg.background = background;
+    else delete run.msg.background;
+    this.emit(run, { type: 'meta', background });
   }
 
   onControlRequest(run, m) {
@@ -278,6 +346,14 @@ export class RunManager {
     const { msg, conv, translator } = run;
     for (const id of [...run.approvals.keys()]) this.resolveApproval(run, id, 'expired', false);
     run.finished = true;
+    clearTimeout(run.settleTimer);
+    delete msg.background;
+    // Kept in the reply so the text is not lost, marked as never seen by Claude.
+    if (msg.queued?.length) {
+      for (const entry of msg.queued) translator.pushPart({ type: 'followup', ...entry, undelivered: true });
+      delete msg.queued;
+      this.emit(run, { type: 'meta', queued: [] });
+    }
     run.killTimers.forEach(clearTimeout);
     if (translator.sessionId) {
       msg.sessionId = translator.sessionId;

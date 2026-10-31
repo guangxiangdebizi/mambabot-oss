@@ -287,6 +287,74 @@ test('stop ends a running reply and keeps the partial text', async () => {
   assert.equal((await request(ctx.port, 'POST', `/api/conversations/${id}/stop`, { body: {}, cookie })).status, 409);
 });
 
+test('a message sent while a reply runs is added to that turn at its next step', async () => {
+  const id = await newConversation();
+  const { run, assistantMessage } = await send(id, 'steps');
+  const res = await request(ctx.port, 'POST', `/api/conversations/${id}/followups`, { body: { text: '顺便看下日志' }, cookie });
+  assert.equal(res.status, 201, res.text);
+  const { events } = await readEvents(ctx.port, eventsPath(id, run), cookie);
+  assert.equal(finalStatus(events), 'done');
+  assert.deepEqual(events.filter((e) => e.type === 'meta' && e.queued).map((e) => e.queued.length), [1, 0]);
+  const conv = (await request(ctx.port, 'GET', `/api/conversations/${id}`, { cookie })).json.conversation;
+  assert.equal(conv.messages.length, 2, 'no extra turn in the tree');
+  const reply = conv.messages.find((m) => m.id === assistantMessage.id);
+  assert.deepEqual(reply.parts.map((p) => p.type), ['tool', 'followup', 'text']);
+  assert.equal(reply.parts[1].id, res.json.followup.id);
+  assert.equal(reply.parts[1].text, '顺便看下日志');
+  assert.equal(reply.parts[1].undelivered, undefined);
+  assert.equal(reply.parts[2].text, 'done +顺便看下日志');
+  assert.deepEqual(reply.queued, []);
+  // The replayed follow-up is not the session tail; the assistant's last message is.
+  assert.notEqual(reply.tailUuid, res.json.followup.id);
+  assert.ok(reply.tailUuid);
+
+  const late = await request(ctx.port, 'POST', `/api/conversations/${id}/followups`, { body: { text: 'x' }, cookie });
+  assert.equal(late.status, 409);
+  const compact = await request(ctx.port, 'POST', `/api/conversations/${id}/followups`, { body: { text: '/compact' }, cookie });
+  assert.equal(compact.status, 409);
+});
+
+test('a reply waiting on background tasks still takes follow-ups and ends after they finish', async () => {
+  const id = await newConversation();
+  const { run, assistantMessage } = await send(id, 'background');
+  let followup;
+  const { events } = await readEvents(ctx.port, eventsPath(id, run), cookie, (ev) => {
+    if (ev.type === 'meta' && ev.background === 1 && !followup) {
+      followup = request(ctx.port, 'POST', `/api/conversations/${id}/followups`, { body: { text: 'echo 还在吗' }, cookie });
+    }
+  });
+  const res = await followup;
+  assert.equal(res?.status, 201, res?.text);
+  assert.equal(finalStatus(events), 'done');
+  assert.ok(events.some((e) => e.type === 'meta' && e.background === 0));
+  const conv = (await request(ctx.port, 'GET', `/api/conversations/${id}`, { cookie })).json.conversation;
+  assert.equal(conv.messages.length, 2, 'no extra turn in the tree');
+  const reply = conv.messages.find((m) => m.id === assistantMessage.id);
+  assert.deepEqual(reply.parts.map((p) => p.type), ['text', 'followup', 'text', 'text']);
+  assert.equal(reply.parts[1].undelivered, undefined);
+  assert.deepEqual(reply.parts.filter((p) => p.type === 'text').map((p) => p.text), ['waiting', 'echo:echo 还在吗', 'woke']);
+  assert.equal(reply.background, undefined);
+});
+
+test('a follow-up still queued when the reply is stopped is kept as undelivered', async () => {
+  const id = await newConversation();
+  const { run, assistantMessage } = await send(id, 'slow');
+  assert.equal((await request(ctx.port, 'POST', `/api/conversations/${id}/followups`, { body: { text: '/compact' }, cookie })).status, 400);
+  assert.equal((await request(ctx.port, 'POST', `/api/conversations/${id}/followups`, { body: { text: '还有这个' }, cookie })).status, 201);
+  const { events } = await readEvents(ctx.port, eventsPath(id, run), cookie, async (ev, all) => {
+    if (ev.type === 'text' && all.filter((e) => e.type === 'text').length === 3) {
+      await request(ctx.port, 'POST', `/api/conversations/${id}/stop`, { body: {}, cookie });
+    }
+  });
+  assert.equal(finalStatus(events), 'stopped');
+  const conv = (await request(ctx.port, 'GET', `/api/conversations/${id}`, { cookie })).json.conversation;
+  const reply = conv.messages.find((m) => m.id === assistantMessage.id);
+  const followup = reply.parts.find((p) => p.type === 'followup');
+  assert.equal(followup.text, '还有这个');
+  assert.equal(followup.undelivered, true);
+  assert.equal(reply.queued, undefined);
+});
+
 test('reconnecting replays only events after the last seen one', async () => {
   const id = await newConversation();
   const { run } = await send(id, 'slow');

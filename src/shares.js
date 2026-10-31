@@ -12,15 +12,30 @@ export const TOKEN_RE = /^[A-Za-z0-9_-]{22,64}$/;
 const MAX_SHARES = 200;
 const LIVE = new Set(['running', 'stopping']);
 
+const names = (attachments) => (attachments || []).map((a) => String(a.name || '附件'));
+
 export function snapshot(conv) {
   const messages = [];
+  const push = (role, texts, tools, attachments, createdAt) => {
+    const text = texts.join('\n\n').trim();
+    if (text || tools || attachments.length) messages.push({ role, text, tools, attachments, createdAt });
+  };
   for (const m of pathTo(conv, conv.leafId)) {
     if (m.role === 'assistant' && LIVE.has(m.status)) continue;
-    const text = m.parts.filter((p) => p.type === 'text').map((p) => p.text || '').join('\n\n').trim();
-    const tools = m.parts.filter((p) => p.type === 'tool').length;
-    const attachments = (m.attachments || []).map((a) => String(a.name || '附件'));
-    if (!text && !tools && !attachments.length) continue;
-    messages.push({ role: m.role === 'user' ? 'user' : 'assistant', text, tools, attachments, createdAt: m.createdAt });
+    // A follow-up Claude received mid-reply splits the reply where it arrived.
+    let texts = [];
+    let tools = 0;
+    for (const p of m.parts) {
+      if (p.type === 'text') texts.push(p.text || '');
+      else if (p.type === 'tool') tools += 1;
+      else if (p.type === 'followup' && !p.undelivered) {
+        push('assistant', texts, tools, [], m.createdAt);
+        push('user', [p.text || ''], 0, names(p.attachments), p.createdAt);
+        texts = [];
+        tools = 0;
+      }
+    }
+    push(m.role === 'user' ? 'user' : 'assistant', texts, tools, m.role === 'user' ? names(m.attachments) : [], m.createdAt);
   }
   return messages;
 }

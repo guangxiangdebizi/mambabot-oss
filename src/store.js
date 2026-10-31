@@ -33,6 +33,8 @@ export class ConversationStore {
         msg.status = 'interrupted';
         msg.error = '服务在回复过程中重启，这条回复已中断。';
         for (const part of msg.parts) if (part.type === 'approval' && part.state === 'pending') part.state = 'expired';
+        for (const entry of msg.queued || []) msg.parts.push({ type: 'followup', ...entry, undelivered: true });
+        delete msg.queued;
         changed = true;
       }
       this.items.set(conv.id, conv);

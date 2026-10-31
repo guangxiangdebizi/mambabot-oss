@@ -98,10 +98,13 @@ export class StreamTranslator {
     this.emit({ type: 'part', index, part: structuredClone(this.msg.parts[index]) });
   }
 
-  appendText(text) {
+  /** Text from another API message (a later turn of the same reply) starts a new paragraph. */
+  appendText(text, messageId = null) {
     if (!text) return;
     let index = this.msg.parts.length - 1;
-    if (this.msg.parts[index]?.type !== 'text') index = this.pushPart({ type: 'text', text: '' });
+    const sameMessage = !messageId || !this.textMessageId || messageId === this.textMessageId;
+    if (this.msg.parts[index]?.type !== 'text' || !sameMessage) index = this.pushPart({ type: 'text', text: '' });
+    if (messageId) this.textMessageId = messageId;
     this.msg.parts[index].text += text;
     this.emit({ type: 'text', index, delta: text });
   }
@@ -176,14 +179,14 @@ export class StreamTranslator {
     if (e.type === 'message_start') this.apiMessageId = e.message?.id || null;
     if (e.type === 'content_block_delta' && e.delta?.type === 'text_delta') {
       if (this.apiMessageId) this.streamed.add(this.apiMessageId);
-      this.appendText(e.delta.text);
+      this.appendText(e.delta.text, this.apiMessageId);
     }
   }
 
   onAssistant(message) {
     for (const block of message.content || []) {
       if (block.type === 'text' && !this.streamed.has(message.id)) {
-        this.appendText(block.text);
+        this.appendText(block.text, message.id);
       } else if (block.type === 'tool_use' && !this.toolIndex.has(block.id)) {
         const index = this.pushPart({
           type: 'tool', id: block.id, name: block.name, summary: summarizeTool(block.name, block.input), state: 'running',

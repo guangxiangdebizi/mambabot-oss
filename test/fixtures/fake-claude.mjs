@@ -1,5 +1,6 @@
 // Stand-in for `claude -p --input-format stream-json --output-format stream-json`.
-// Behaviour is chosen by the user prompt: slow | tool | crash | args | (default).
+// Behaviour is chosen by the user prompt: slow | steps | background | tool | crash | args | echo | (default).
+// A user message that arrives mid-turn is queued and taken in at the next step, as the CLI does.
 import { randomUUID } from 'node:crypto';
 
 const args = process.argv.slice(2);
@@ -18,6 +19,40 @@ const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 const pending = new Map();
 let interrupted = false;
 let slowTimer = null;
+const queue = [];
+let busy = false;
+let wake = null;
+let backgroundRunning = false;
+let stdinEnded = false;
+
+const textOf = (content) => (typeof content === 'string' ? content
+  : content.map((b) => (b.type === 'text' ? b.text : `[${b.type}:${b.source?.media_type}]`)).join(' '));
+
+/** --replay-user-messages: each user message is echoed (with its uuid) when it is taken in. */
+function replay(m) {
+  if (has('--replay-user-messages')) out({ type: 'user', isReplay: true, uuid: m.uuid, message: m.message, session_id: sessionId });
+}
+
+function take(m) {
+  if (busy) {
+    queue.push(m);
+    wake?.();
+    return;
+  }
+  busy = true;
+  // The real CLI echoes a slash command only after running it.
+  const command = textOf(m.message.content).startsWith('/');
+  if (!command && !m.notification) replay(m);
+  onUser(m.message.content).then((keepBusy) => {
+    if (command) replay(m);
+    return keepBusy;
+  }).then((keepBusy) => {
+    if (keepBusy) return;
+    busy = false;
+    const next = queue.shift();
+    if (next) take(next);
+  });
+}
 
 function result(text, extra = {}) {
   out({
@@ -44,9 +79,9 @@ function askPermission(toolName, input) {
   return new Promise((resolve) => pending.set(requestId, resolve));
 }
 
+/** Resolves true while the turn keeps running in the background (slow). */
 async function onUser(content) {
-  const text = typeof content === 'string' ? content
-    : content.map((b) => (b.type === 'text' ? b.text : `[${b.type}:${b.source?.media_type}]`)).join(' ');
+  const text = textOf(content);
   out({ type: 'system', subtype: 'init', session_id: sessionId, model: runtimeModel });
   if (text.includes('crash')) process.exit(3);
   if (text.startsWith('/compact')) {
@@ -65,7 +100,42 @@ async function onUser(content) {
       n += 1;
       out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: `第${n}行\n` } } });
     }, 40);
+    return true;
+  }
+  if (text === '__task_notification') {
+    streamText('msg_b2', ['woke']);
+    result('woke');
+    backgroundRunning = false;
+    if (stdinEnded) setImmediate(() => process.exit(0));
     return;
+  }
+  if (text.includes('background')) {
+    // Ends the turn with a background task running; its completion starts one more turn, and
+    // the process keeps running for it even after stdin ends, as the CLI does.
+    backgroundRunning = true;
+    out({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'b1', task_type: 'local_bash' }], session_id: sessionId });
+    streamText('msg_b1', ['waiting']);
+    result('waiting');
+    setTimeout(() => {
+      out({ type: 'system', subtype: 'background_tasks_changed', tasks: [], session_id: sessionId });
+      take({ notification: true, message: { content: '__task_notification' } });
+    }, Number(process.env.FAKE_BACKGROUND_MS || 1500));
+    return;
+  }
+  if (text.includes('steps')) {
+    // One tool step that lasts until a follow-up is queued (or 3 s), then the queue is taken in.
+    out({ type: 'assistant', uuid: randomUUID(), message: { id: 'msg_s1', model: runtimeModel, content: [{ type: 'tool_use', id: 'toolu_s', name: 'Bash', input: { command: 'sleep 1' } }] } });
+    await new Promise((resolve) => {
+      wake = resolve;
+      if (queue.length) resolve();
+      setTimeout(resolve, 3000);
+    });
+    wake = null;
+    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_s', content: 'ok' }] } });
+    const added = queue.splice(0).map((q) => { replay(q); return textOf(q.message.content); });
+    streamText('msg_s2', [`done${added.map((t) => ` +${t}`).join('')}`]);
+    result('done');
+    return false;
   }
   if (text.includes('tool')) {
     out({ type: 'assistant', message: { id: 'msg_t1', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'echo hi' } }] } });
@@ -144,11 +214,12 @@ process.stdin.on('data', (chunk) => {
       pending.get(m.response.request_id)?.(m.response.response);
       pending.delete(m.response.request_id);
     } else if (m.type === 'user') {
-      onUser(m.message.content);
+      take(m);
     }
   }
 });
 process.stdin.on('end', () => {
-  if (!slowTimer || interrupted) process.exit(0);
+  stdinEnded = true;
+  if ((!slowTimer || interrupted) && !backgroundRunning) process.exit(0);
 });
 process.on('SIGTERM', () => process.exit(143));
