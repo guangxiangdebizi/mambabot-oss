@@ -111,6 +111,7 @@ node src/server.js                # 默认监听 127.0.0.1:3400
 |---|---|---|
 | `AW_PORT` / `AW_HOST` | `3400` / `127.0.0.1` | 监听地址，建议只监听本机，由 nginx 对外 |
 | `AW_ALLOWED_HOSTS` | — | 对外的域名（逗号分隔），用于 Host 校验 |
+| `AW_ACCOUNT_LINKS` | — | 你的其他 MambaBot 站点，显示在「设置 › 切换账号」里，格式 `名称\|https://域名`，逗号分隔（写进 site.env 时加引号） |
 | `AW_TRUST_PROXY` / `AW_COOKIE_SECURE` | `0` | 放在 nginx 后面时都设成 `1` |
 | `AW_CLAUDE_CWD` | `~/assistant-home` | Claude 的工作目录，网页会话和你在终端里用的会话互不干扰 |
 | `AW_DATA_DIR` / `AW_CONFIG_DIR` | `~/.local/share/assistant-web` / `~/.config/assistant-web` | 对话数据 / 登录凭据 |

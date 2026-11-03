@@ -208,3 +208,12 @@ test('browser: an Xvfb left behind by this app is reclaimed, a foreign one is no
 function existsSyncSafe(p) {
   try { return statSync(p).isFile(); } catch { return false; }
 }
+
+test('account links keep only named http(s) origins', async () => {
+  const { parseAccountLinks } = await import('../src/config.js');
+  assert.deepEqual(
+    parseAccountLinks('主账号|https://a.example.com/x, 第二个 | https://b.example.com ,bad,|https://c.example.com,js|javascript:alert(1),u|https://me:pw@d.example.com'),
+    [{ name: '主账号', url: 'https://a.example.com' }, { name: '第二个', url: 'https://b.example.com' }],
+  );
+  assert.deepEqual(parseAccountLinks(undefined), []);
+});

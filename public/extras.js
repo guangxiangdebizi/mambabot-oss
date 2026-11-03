@@ -139,6 +139,11 @@ function renderSettings() {
 
   body.append(permissionSection(), runSection(), notifySection());
 
+  // Own request and fixed slot: switching must still work when this account's CLI cannot answer.
+  const switchSlot = el('div');
+  body.append(switchSlot);
+  renderAccountLinks(switchSlot);
+
   const acct = section('账号');
   const dl = el('dl', 'kv');
   const kv = (k, v) => { if (v) dl.append(el('dt', '', k), el('dd', '', v)); };
@@ -417,6 +422,27 @@ export async function openShare(convId) {
   } catch (err) {
     if (err.status !== 401) render(err.message);
   }
+}
+
+async function renderAccountLinks(container) {
+  let links;
+  try {
+    links = (await h.api('/api/account-links')).links;
+  } catch {
+    return;
+  }
+  if (!links.length) return;
+  const sec = section('切换账号');
+  const list = el('div', 'account-links');
+  for (const link of links) {
+    const current = new URL(link.url).host === location.host;
+    const item = el(current ? 'span' : 'a', `account-link${current ? ' current' : ''}`);
+    if (!current) item.href = link.url;
+    item.append(el('span', '', link.name), el('span', 'account-link-note', current ? '当前' : new URL(link.url).host));
+    list.append(item);
+  }
+  sec.append(list, el('p', 'sheet-muted', '每个账号是独立的站点，会话、记忆和定时任务互不相通；第一次进入需要单独登录。'));
+  container.append(sec);
 }
 
 async function renderSharesSection(container) {

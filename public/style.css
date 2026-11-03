@@ -724,3 +724,10 @@ body.resizing .sidebar { transition: none; }
 .viewer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .viewer .link-btn, .viewer .icon-btn { color: #fff; }
 .viewer img { flex: 1; min-height: 0; width: 100%; object-fit: contain; padding: 0 8px max(8px, env(safe-area-inset-bottom)); }
+
+/* Switch account */
+.account-links { display: flex; flex-direction: column; gap: 6px; }
+.account-link { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; text-decoration: none; }
+a.account-link:hover { background: var(--hover); }
+.account-link.current { background: var(--hover); }
+.account-link-note { color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }

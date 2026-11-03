@@ -717,6 +717,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       await writeJsonAtomic(prefsPath, prefs);
       return sendJson(res, 200, { prefs });
     }
+    if (path === '/api/account-links' && method === 'GET') return sendJson(res, 200, { links: cfg.accountLinks || [] });
     if (path === '/api/account' && method === 'GET') {
       try {
         const { account: acct, version, usage, fetchedAt } = await account.get({ force: url.searchParams.get('refresh') === '1' });
