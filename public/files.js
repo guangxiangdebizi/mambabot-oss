@@ -47,7 +47,7 @@ export function setFilesRoot(key, name) {
 }
 
 export function openFiles() {
-  hooks.closeBrowser?.();
+  hooks.closeOthers?.();
   ui.panel.hidden = false;
   document.body.classList.add('bp-open');
   ui.chip.setAttribute('aria-expanded', 'true');
@@ -269,9 +269,6 @@ export function initFiles(h) {
     const img = e.target.closest('.fp-img');
     if (img) hooks.openViewer?.(img.src, st.file?.name || '');
   });
-  for (const b of document.querySelectorAll('.panel-tab[data-panel]')) {
-    b.addEventListener('click', () => (b.dataset.panel === 'files' ? openFiles() : hooks.openBrowser?.()));
-  }
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && isFilesOpen() && narrow.matches && !document.querySelector('dialog[open]')) closeFiles();
   });

@@ -1,8 +1,24 @@
 {
   "name": "assistant-web",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "MambaBot: a private, phone-friendly web interface for Claude Code on your own server",
+  "description": "MambaBot: an open-source, self-hosted, always-on AI agent (like Grok Bot, ChatGPT dots, Meta Muse) on your own server with Claude Code",
+  "keywords": [
+    "ai-agent",
+    "always-on-agent",
+    "self-hosted",
+    "claude-code",
+    "claude",
+    "anthropic",
+    "grok-bot-alternative",
+    "chatgpt-dots-alternative",
+    "meta-muse-alternative",
+    "autonomous-agent",
+    "mcp",
+    "browser-automation",
+    "mobile-friendly",
+    "web-ui"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22"

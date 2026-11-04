@@ -39,6 +39,7 @@ const PATHS = {
   folder: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'],
   'folder-plus': ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', 'M12 10.5v5', 'M9.5 13h5'],
   download: ['M12 4v11', 'M7 10l5 5 5-5', 'M5 20h14'],
+  terminal: ['M4 5h16v14H4z', 'M7.5 9.5l3 2.5-3 2.5', 'M12.5 15h4'],
 };
 
 const NS = 'http://www.w3.org/2000/svg';

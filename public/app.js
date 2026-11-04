@@ -7,6 +7,9 @@ import {
   closeFiles, initFiles, openFiles, openPath, refreshFilesSoon, setFilesRoot,
 } from './files.js';
 import {
+  closeTerminal, initTerminal, openTerminal, refreshTerminalClaude, setTerminalRoot, showClaudeCommand,
+} from './terminal.js';
+import {
   exportMarkdown, initExtras, notify, openPlusMenu, openSettings, openShare, openStatus, openTasks,
 } from './extras.js';
 import { initResizers } from './resize.js';
@@ -170,7 +173,7 @@ const browserHooks = {
   isAuthed: () => authed,
   currentConvId: () => state.conv?.id || null,
   confirm: (title, text, ok = '接管') => confirmDialog(title, text, ok, false),
-  onOpen: () => closeFiles({ focus: false }),
+  onOpen: () => { closeFiles({ focus: false }); closeTerminal({ focus: false }); },
   onHelp(help) {
     announce(`助理需要你在浏览器中操作：${help.reason}`);
     if (help.convId !== state.conv?.id) {
@@ -934,6 +937,7 @@ function scheduleMessageRender(msg) {
     if (node) fillMessage(node, msg);
     else renderMessages();
     updateChrome();
+    refreshTerminalClaude();
     if (state.stick) scrollToBottom();
     else ui.jump.hidden = false;
   });
@@ -953,6 +957,7 @@ function render(toBottom = false) {
   const keep = !toBottom && !state.stick ? ui.scroller.scrollTop : null;
   renderMessages();
   updateChrome();
+  refreshTerminalClaude();
   if (toBottom || state.stick) scrollToBottom();
   else if (keep !== null) ui.scroller.scrollTop = keep;
 }
@@ -983,6 +988,20 @@ function updateChrome() {
   ui.projChipName.textContent = project?.name || '';
   ui.projChip.title = project ? `项目目录：${project.dir}（点击浏览文件）` : '';
   setFilesRoot(project ? project.id : 'default', project?.name || '');
+  setTerminalRoot(project ? project.id : 'default', project?.name || '');
+}
+
+/** Commands Claude ran on the shown branch, for the terminal panel. */
+function claudeCommands() {
+  const out = [];
+  for (const m of visiblePath()) {
+    if (m.role !== 'assistant') continue;
+    for (const p of m.parts) {
+      if (p.type !== 'tool' || p.name !== 'Bash') continue;
+      out.push({ id: p.id, command: p.detail || p.summary || '', desc: p.summary, output: p.output, state: p.state, at: p.at || m.createdAt });
+    }
+  }
+  return out;
 }
 
 function pickFiles() {
@@ -1387,6 +1406,13 @@ function activityBlock(tools, running) {
     row.append(el('span', 'tool-state', { running: '进行中', done: '完成', error: '失败' }[t.state] || ''));
     li.append(row);
     if (t.detail) li.append(el('pre', 'tool-detail', t.detail));
+    if (t.name === 'Bash') {
+      if (t.output) li.append(el('pre', 'tool-output', t.output.length > 2000 ? `${t.output.slice(0, 2000)}\n…` : t.output));
+      const open = el('button', 'link-btn tool-open', '在终端面板查看');
+      open.type = 'button';
+      open.dataset.tool = t.id;
+      li.append(open);
+    }
     ul.append(li);
   }
   det.append(ul);
@@ -1798,9 +1824,12 @@ $('open-tasks').addEventListener('click', () => { if (narrow.matches) setDrawer(
 $('open-settings').addEventListener('click', () => { if (narrow.matches) setDrawer(false); openSettings(); });
 $('perm-chip').addEventListener('click', () => openSettings());
 initResizers();
-initFiles({ api, toast, openBrowser, openViewer, closeBrowser: () => closeBrowser({ focus: false }) });
+initFiles({ api, toast, openViewer, closeOthers: () => { closeBrowser({ focus: false }); closeTerminal({ focus: false }); } });
+initTerminal({ api, toast, claudeCommands, closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); } });
+const PANELS = { files: openFiles, terminal: openTerminal, browser: openBrowser };
+for (const b of document.querySelectorAll('.panel-tab[data-panel]')) b.addEventListener('click', () => PANELS[b.dataset.panel]());
 initExtras({
-  api, toast, openMenu, newChat: () => newChat(currentProject()?.id || null), openModelPop, openBrowser, openFiles, pickFiles, setComposer, sendCommand,
+  api, toast, openMenu, newChat: () => newChat(currentProject()?.id || null), openModelPop, openBrowser, openFiles, openTerminal, pickFiles, setComposer, sendCommand,
   input: () => ui.input,
   currentConv: () => (state.conv?.id ? { id: state.conv.id, live: isLive() } : null),
   models: () => state.models,
@@ -1859,6 +1888,8 @@ ui.convMenuBtn.addEventListener('click', () => state.conv && convMenu(ui.convMen
 ui.messages.addEventListener('click', (e) => {
   const pathLink = e.target.closest('.path-link');
   if (pathLink) { openPath(pathLink.dataset.path); return; }
+  const toolOpen = e.target.closest('.tool-open');
+  if (toolOpen) { showClaudeCommand(toolOpen.dataset.tool); return; }
   const view = e.target.closest('a[data-view]');
   if (view && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
     e.preventDefault();

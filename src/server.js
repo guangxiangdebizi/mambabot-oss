@@ -20,6 +20,7 @@ import { MEDIA_SERVER, MediaMcp } from './media.js';
 import { TASK_SERVER, TaskMcp, TaskScheduler, describeCron, nextRun, parseCron } from './schedule.js';
 import { ShareStore, TOKEN_RE } from './shares.js';
 import { DEFAULT_ROOT, FileError, ProjectStore } from './projects.js';
+import { TerminalManager } from './terminal.js';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 const COOKIE = 'aw_session';
@@ -154,6 +155,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
   await projects.load();
   // A chat keeps the directory it was created in (Claude sessions are stored per directory).
   const cwdOf = (conv) => conv.cwd || cfg.claudeCwd;
+  const terminal = new TerminalManager({ cfg, log });
   const shares = new ShareStore(cfg.dataDir);
   await shares.load();
   const runMcpDir = join(cfg.dataDir, 'run-mcp');
@@ -645,6 +647,55 @@ export async function createApp(cfg = loadConfig(), log = console) {
   }
 
   /**
+   * The owner's command line for a project (or the default directory): run one command at a
+   * time, type into it, stop it; `events` streams a snapshot and then the live output.
+   */
+  async function terminalApi(req, res, path, method) {
+    const tm = path.match(/^\/api\/terminal\/([^/]+)(?:\/(events|run|input|stop|clear))?$/);
+    if (!tm || !(ID_RE.test(tm[1]) || tm[1] === DEFAULT_ROOT)) throw new HttpError(404, '接口不存在');
+    const [, key, action] = tm;
+    let dir;
+    try { dir = projects.rootDir(key); } catch (err) { throw new HttpError(err.status || 404, err.message); }
+    if (!action && method === 'GET') return sendJson(res, 200, terminal.snapshot(key, dir));
+    if (action === 'events' && method === 'GET') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
+      });
+      const send = (ev) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(ev)}\n\n`); };
+      send({ type: 'snapshot', ...terminal.snapshot(key, dir) });
+      const listener = (k, ev) => { if (k === key) send(ev); };
+      terminal.on('event', listener);
+      const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 20000);
+      res.on('close', () => { clearInterval(ping); terminal.off('event', listener); });
+      return undefined;
+    }
+    if (method !== 'POST' || !action || action === 'events') throw new HttpError(405, '不支持的请求方法');
+    const body = await readBody(req);
+    if (action === 'run') {
+      const command = typeof body.command === 'string' ? body.command.trim() : '';
+      if (!command) throw new HttpError(400, '命令不能为空');
+      if (command.length > MAX_MESSAGE) throw new HttpError(400, '命令过长');
+      try {
+        const entry = await terminal.run(key, dir, command);
+        log.info(`终端命令 root=${key}: ${command.split('\n')[0].slice(0, 200)}`);
+        return sendJson(res, 201, { entry });
+      } catch (err) {
+        throw new HttpError(409, err.message);
+      }
+    }
+    if (action === 'input') {
+      if (!terminal.input(key, String(body.text ?? ''))) throw new HttpError(409, '没有正在运行的命令');
+      return sendJson(res, 200, { ok: true });
+    }
+    if (action === 'stop') {
+      if (!terminal.stop(key)) throw new HttpError(409, '没有正在运行的命令');
+      return sendJson(res, 200, { ok: true });
+    }
+    terminal.clear(key);
+    return sendJson(res, 200, terminal.snapshot(key, dir));
+  }
+
+  /**
    * The app's own MCP servers for Claude runs (tasks, media): loopback only, per-run bearer
    * token, never through nginx.
    */
@@ -825,6 +876,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     }
     if (path.startsWith('/api/tasks')) return tasksApi(req, res, path, method);
     if (path === '/api/projects' || path.startsWith('/api/projects/')) return projectsApi(req, res, url, method);
+    if (path.startsWith('/api/terminal/')) return terminalApi(req, res, path, method);
     if (path.startsWith('/api/browser')) return browserApi(req, res, path, method);
     if (path === '/api/uploads' && method === 'POST') return upload(req, res);
     const um = path.match(/^\/api\/uploads\/([^/]+)$/);
@@ -1024,6 +1076,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     },
     async close() {
       scheduler.stop();
+      terminal.shutdown();
       server.close();
       await runs.shutdown();
       server.closeAllConnections();

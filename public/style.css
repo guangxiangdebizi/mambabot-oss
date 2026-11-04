@@ -674,7 +674,7 @@ body.share-page { overflow: auto; height: auto; min-height: 100%; }
   background: transparent; transition: background-color .15s ease;
 }
 .resizer:hover::after, .resizer.dragging::after, .resizer:focus-visible::after { background: var(--accent); }
-.sb-collapsed #sb-resize, #bp-resize:has(+ #browser-panel[hidden] + #files-panel[hidden]) { display: none; }
+.sb-collapsed #sb-resize, #bp-resize:has(+ #browser-panel[hidden] + #files-panel[hidden] + #term-panel[hidden]) { display: none; }
 body.resizing { cursor: col-resize; user-select: none; -webkit-user-select: none; }
 body.resizing .sidebar { transition: none; }
 @media (max-width: 767px) { .resizer { display: none; } }
@@ -800,4 +800,48 @@ a.icon-btn { display: inline-grid; place-items: center; color: inherit; }
 @media (max-width: 767px) {
   .proj-chip { padding: 0 8px; max-width: 120px; }
   .fp-body { margin: 0; border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0; }
+}
+
+/* ---------- terminal panel ---------- */
+.tm-bar { display: flex; align-items: center; gap: 10px; margin: 0 12px 6px; }
+.tm-filter { flex-shrink: 0; }
+.tm-filter button { padding: 4px 10px; font-size: 13px; }
+.tm-root { flex: 1; min-width: 0; font-size: 12px; font-family: var(--mono); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-feed { flex: 1; min-height: 0; overflow: auto; margin: 0 12px; padding: 6px 0; border: 1px solid var(--border); border-radius: 12px; background: var(--code-bg); overscroll-behavior: contain; }
+.tm-empty { display: grid; justify-items: center; gap: 6px; padding: 32px 20px; text-align: center; color: var(--text-2); }
+.tm-empty p { margin: 0; max-width: 30em; }
+.tm-entry { border-bottom: 1px solid var(--border); }
+.tm-entry:last-child { border-bottom: 0; }
+.tm-entry.flash { animation: tm-flash 1.6s ease; }
+@keyframes tm-flash { 0%, 40% { background: var(--accent-soft); } 100% { background: transparent; } }
+.tm-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 4px 10px; border: 0; background: transparent; cursor: pointer; text-align: left; color: var(--text); }
+.tm-head:hover { background: var(--hover); }
+.tm-head > .ico { flex-shrink: 0; color: var(--text-3); }
+.tm-who { flex-shrink: 0; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); }
+.who-claude .tm-who { background: var(--accent-soft); color: var(--accent); }
+.tm-cmd { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-cmd::before { content: "$ "; color: var(--text-3); }
+.tm-state { flex-shrink: 0; font-size: 12px; color: var(--text-3); }
+.st-running .tm-state { color: var(--accent); }
+.st-error .tm-state, .st-stopped .tm-state { color: var(--danger); }
+.tm-desc { margin: -4px 10px 6px 36px; font-size: 12px; color: var(--text-2); }
+.tm-body { padding: 0 10px 10px 36px; }
+.tm-meta { margin: 0 0 6px; font-size: 12px; color: var(--text-3); }
+.tm-full, .tm-out { margin: 0 0 6px; padding: 8px 10px; border-radius: 8px; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.tm-full { background: var(--surface-2); }
+.tm-out { background: var(--bg); border: 1px solid var(--border); max-height: 60vh; overflow: auto; }
+.tm-form { display: flex; align-items: center; gap: 6px; padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+.tm-prompt { flex-shrink: 0; max-width: 30%; font-family: var(--mono); font-size: 13px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-form input { flex: 1; min-width: 0; min-height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--bg); font-family: var(--mono); font-size: 14px; }
+.tool-output { margin: 4px 0 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: 8px; background: var(--surface-2); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.tool-open { margin-top: 4px; font-size: 13px; }
+@media (max-width: 767px) {
+  .tm-feed { margin: 0; border-radius: 0; border-left: 0; border-right: 0; }
+  .tm-form input { font-size: 16px; }
+  .tm-root { display: none; }
+}
+@media (min-width: 768px) {
+  /* With a side panel open the chat column is narrow: chips keep only their icons. */
+  .bp-open .top-chip-text { display: none; }
+  .bp-open .top-chip { padding: 0 10px; }
 }

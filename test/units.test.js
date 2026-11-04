@@ -77,14 +77,16 @@ test('stream translator: streamed text is not duplicated, tools tracked, subagen
   t.handle({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'raw output' }] } });
   t.handle({ type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: '完成' }] } });
   t.handle({ type: 'result', subtype: 'success', session_id: 's1', result: '完成' });
+  assert.ok(typeof msg.parts[1].at === 'string');
+  delete msg.parts[1].at;
+  // A command keeps its output (the terminal panel shows it); thinking is never kept.
   assert.deepEqual(msg.parts, [
     { type: 'text', text: '先看' },
-    { type: 'tool', id: 'tu1', name: 'Bash', summary: '列出文件', state: 'done', detail: 'ls -la\nrm x' },
+    { type: 'tool', id: 'tu1', name: 'Bash', summary: '列出文件', state: 'done', detail: 'ls -la\nrm x', output: 'raw output' },
     { type: 'text', text: '完成' },
   ]);
   assert.equal(t.sessionId, 's1');
   assert.ok(!JSON.stringify(events).includes('secret'));
-  assert.ok(!JSON.stringify(events).includes('raw output'));
   // Part events are snapshots, so replaying them later cannot double-count text.
   assert.equal(events.find((e) => e.type === 'part' && e.index === 0).part.text, '');
 });

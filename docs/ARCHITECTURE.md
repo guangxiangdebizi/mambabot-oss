@@ -33,7 +33,7 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   `/api/commands`). Session settings that would not outlive a one-reply process (`/model`,
   `/effort`, `/usage`, `/clear`, `/rename`) are handled by the page instead; terminal-only
   ones (`/color`, `/loop`, `/mcp`, …) are hidden; `/compact` is passed through to the CLI. The `+` button opens upload, commands,
-  files, browser, scheduled tasks and usage.
+  files, terminal, browser, scheduled tasks and usage.
 - **`/compact` and `/status`**: `/compact [要保留的重点]` is sent to the CLI as the next turn of
   the branch (it runs its own compaction in that session); the reply shows a compaction note
   with the CLI's before/after token counts, and its replayed "Compacted" entry becomes the
@@ -62,6 +62,18 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   NUL-sniffed for binaries), `raw` serves images inline (SVG under a sandbox CSP) and
   everything else as a download. The panel reloads after a reply's file-changing tool calls
   and at the end of a run, and inline code in replies that looks like a path opens it.
+- **Terminal panel** (`src/terminal.js`, `public/terminal.js`): the owner's command line per
+  root (a project or `default`), `POST /api/terminal/<root>/{run,input,stop,clear}` and
+  `GET /api/terminal/<root>[/events]` (SSE: a snapshot, then `start` / `out` / `end`). One
+  command at a time, each a `bash -c` in its own process group, started in the root's
+  current directory; an EXIT trap reports the final `pwd` on fd 3, so `cd` carries over.
+  stdin is a pipe (typing while a command runs answers its prompts), stop sends SIGINT to
+  the group, then SIGTERM and SIGKILL. No pty: `TERM=dumb`, `NO_COLOR`, pagers off; the page
+  strips escape sequences and applies carriage returns. Output is kept in memory (512 KB
+  tail per command, last 50 commands per root) and lost on restart. Claude's Bash calls are
+  listed alongside: the stream translator now keeps a Bash result's text on its tool part
+  (`output`, head and tail of 16 KB) with a start time (`at`); shares still carry no tool
+  data.
 - **Showing files** (`src/media.js`): every run gets an `assistant-media` MCP server
   (`/internal/mcp/media`, loopback only, per-run token, pre-approved) with one tool,
   `show_file(path, caption?)`. The file (≤ 20 MB, ≤ 20 per reply) is copied into the upload

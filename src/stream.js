@@ -37,6 +37,20 @@ export function approvalDetail(name, input = {}) {
   }
 }
 
+const OUTPUT_LIMIT = 16000;
+/** Head and tail of a long tool output (the end usually holds the error or the result). */
+function clipOutput(text) {
+  if (text.length <= OUTPUT_LIMIT) return text;
+  const half = OUTPUT_LIMIT / 2;
+  return `${text.slice(0, half)}\n…（中间省略 ${text.length - OUTPUT_LIMIT} 个字符）…\n${text.slice(-half)}`;
+}
+
+function resultText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter((c) => c?.type === 'text').map((c) => c.text || '').join('\n');
+}
+
 /** Shorter input view for the collapsible activity list. */
 export function toolDetail(name, input = {}) {
   const full = approvalDetail(name, input);
@@ -190,7 +204,7 @@ export class StreamTranslator {
       } else if (block.type === 'tool_use' && !this.toolIndex.has(block.id)) {
         const index = this.pushPart({
           type: 'tool', id: block.id, name: block.name, summary: summarizeTool(block.name, block.input), state: 'running',
-          detail: toolDetail(block.name, block.input),
+          detail: toolDetail(block.name, block.input), at: new Date().toISOString(),
         });
         this.toolIndex.set(block.id, index);
       }
@@ -203,7 +217,13 @@ export class StreamTranslator {
       if (block.type !== 'tool_result') continue;
       const index = this.toolIndex.get(block.tool_use_id);
       if (index === undefined) continue;
-      this.msg.parts[index].state = block.is_error ? 'error' : 'done';
+      const part = this.msg.parts[index];
+      part.state = block.is_error ? 'error' : 'done';
+      // Commands keep their output for the terminal panel; other tools only their errors.
+      if (part.name === 'Bash' || block.is_error) {
+        const text = resultText(block.content);
+        if (text) part.output = clipOutput(text);
+      }
       this.updatePart(index);
     }
   }

@@ -69,6 +69,9 @@
         <button id="files-btn" type="button" class="top-chip" aria-controls="files-panel" aria-expanded="false">
           <span data-icon="folder" aria-hidden="true"></span><span id="files-btn-text" class="top-chip-text">文件</span>
         </button>
+        <button id="term-btn" type="button" class="top-chip" aria-controls="term-panel" aria-expanded="false">
+          <span data-icon="terminal" aria-hidden="true"></span><span class="top-chip-text">终端</span><span id="term-dot" class="dot" hidden></span>
+        </button>
         <button id="browser-btn" type="button" class="top-chip" aria-controls="browser-panel" aria-expanded="false">
           <span data-icon="globe" aria-hidden="true"></span><span class="top-chip-text">浏览器</span><span id="browser-dot" class="dot" hidden></span>
         </button>
@@ -109,6 +112,7 @@
         <button id="bp-back" type="button" class="bp-back" data-icon-lead="back"><span>返回对话</span></button>
         <div class="panel-tabs" role="group" aria-label="右侧面板">
           <button type="button" class="panel-tab" data-panel="files">文件</button>
+          <button type="button" class="panel-tab" data-panel="terminal">终端</button>
           <h2 id="bp-heading" class="panel-tab current" aria-current="true">浏览器</h2>
         </div>
         <span id="bp-status" class="bp-pill" role="status"></span>
@@ -148,6 +152,7 @@
         <button id="fp-back" type="button" class="bp-back" data-icon-lead="back"><span>返回对话</span></button>
         <div class="panel-tabs" role="group" aria-label="右侧面板">
           <h2 id="fp-heading" class="panel-tab current" aria-current="true">文件</h2>
+          <button type="button" class="panel-tab" data-panel="terminal">终端</button>
           <button type="button" class="panel-tab" data-panel="browser">浏览器</button>
         </div>
         <div class="topbar-spacer"></div>
@@ -168,6 +173,35 @@
         </div>
         <div id="fp-body" class="fp-body"></div>
       </div>
+    </aside>
+    <aside id="term-panel" class="bpanel tpanel" aria-labelledby="tm-heading" hidden>
+      <div class="bp-head">
+        <button id="tm-back" type="button" class="bp-back" data-icon-lead="back"><span>返回对话</span></button>
+        <div class="panel-tabs" role="group" aria-label="右侧面板">
+          <button type="button" class="panel-tab" data-panel="files">文件</button>
+          <h2 id="tm-heading" class="panel-tab current" aria-current="true">终端</h2>
+          <button type="button" class="panel-tab" data-panel="browser">浏览器</button>
+        </div>
+        <div class="topbar-spacer"></div>
+        <button id="tm-clear" type="button" class="icon-btn" aria-label="清空我的命令记录" title="清空我的命令记录" data-icon="trash"></button>
+        <button id="tm-close" type="button" class="icon-btn bp-close" aria-label="收起终端面板" title="收起" data-icon="x"></button>
+      </div>
+      <div class="tm-bar">
+        <div id="tm-filter" class="seg tm-filter" role="radiogroup" aria-label="显示哪些命令">
+          <button type="button" role="radio" data-filter="all" aria-checked="true">全部</button>
+          <button type="button" role="radio" data-filter="me" aria-checked="false">我的</button>
+          <button type="button" role="radio" data-filter="claude" aria-checked="false">Claude</button>
+        </div>
+        <span id="tm-root" class="tm-root"></span>
+      </div>
+      <div id="tm-feed" class="tm-feed" aria-live="off"></div>
+      <form id="tm-form" class="tm-form" novalidate>
+        <span id="tm-prompt" class="tm-prompt" aria-hidden="true"></span>
+        <label for="tm-input" class="sr-only">命令</label>
+        <input id="tm-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="输入命令，回车运行">
+        <button id="tm-run" type="submit" class="btn btn-primary btn-sm">运行</button>
+        <button id="tm-stop" type="button" class="btn btn-danger btn-sm" hidden>停止</button>
+      </form>
     </aside>
   </div>
 
