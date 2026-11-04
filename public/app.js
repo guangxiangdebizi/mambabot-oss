@@ -1,8 +1,11 @@
 import { renderMarkdown } from './markdown.js';
 import { hydrateIcons, icon } from './icons.js';
 import {
-  browserSnapshot, helpKindLabel, open as openBrowser, startBrowserEvents, stopBrowserEvents,
+  browserSnapshot, close as closeBrowser, helpKindLabel, open as openBrowser, startBrowserEvents, stopBrowserEvents,
 } from './browser.js';
+import {
+  closeFiles, initFiles, openFiles, openPath, refreshFilesSoon, setFilesRoot,
+} from './files.js';
 import {
   exportMarkdown, initExtras, notify, openPlusMenu, openSettings, openShare, openStatus, openTasks,
 } from './extras.js';
@@ -25,6 +28,9 @@ const ui = {
   popScrim: $('pop-scrim'), renameDialog: $('rename-dialog'), renameForm: $('rename-form'), renameInput: $('rename-input'),
   renameCancel: $('rename-cancel'), confirmDialog: $('confirm-dialog'), confirmTitle: $('confirm-title'),
   confirmText: $('confirm-text'), confirmOk: $('confirm-ok'), toast: $('toast'), live: $('live'),
+  projChip: $('proj-chip'), projChipName: $('proj-chip-name'), projectDialog: $('project-dialog'),
+  projectForm: $('project-form'), projectName: $('project-name'), projectDir: $('project-dir'),
+  projectHint: $('project-hint'), projectError: $('project-error'),
 };
 
 const EFFORT_LABEL = { low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' };
@@ -53,6 +59,12 @@ const toolLabel = (name) => {
   return name?.startsWith('mcp__') ? name.split('__').slice(1).join(' · ') : name || '工具';
 };
 const isHelpTool = (name) => name === `${BROWSER_PREFIX}request_human_help`;
+// Tools whose summary is a file path (clickable into the file panel), and those that may change files.
+const PATH_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+const CHANGE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash']);
+// Inline code in a reply that looks like a file path: has a slash or a file extension, no spaces.
+const PATH_RE = /^(?:~\/|\.{1,2}\/|\/)?(?:[\w.\-\u4e00-\u9fff]+\/)*[\w\-\u4e00-\u9fff][\w.\-\u4e00-\u9fff]*(?:\.[A-Za-z][A-Za-z0-9]{0,7}|\/)$/;
+const looksLikePath = (s) => s.length < 300 && PATH_RE.test(s) && (s.includes('/') || /\.[A-Za-z]/.test(s)) && !/^\d/.test(s);
 // The shown file itself appears in the reply, so its tool call needs no activity row.
 const isQuietTool = (name) => name === `${BROWSER_PREFIX}await_human_help` || name === 'mcp__assistant-media__show_file';
 
@@ -73,6 +85,11 @@ const state = {
   listCursor: null,
   listLoading: false,
   renderCount: 30, // newest messages rendered; more appear as the reader scrolls up
+  projects: [],
+  projectConvs: new Map(), // project id -> its chats (expanded projects only)
+  openProjects: new Set(), // expanded in the sidebar
+  draftProject: null, // project of a chat that does not exist yet
+  defaultDir: '',
 };
 const MSG_PAGE = 30;
 
@@ -153,10 +170,11 @@ const browserHooks = {
   isAuthed: () => authed,
   currentConvId: () => state.conv?.id || null,
   confirm: (title, text, ok = '接管') => confirmDialog(title, text, ok, false),
+  onOpen: () => closeFiles({ focus: false }),
   onHelp(help) {
     announce(`助理需要你在浏览器中操作：${help.reason}`);
     if (help.convId !== state.conv?.id) {
-      const c = state.conversations.find((x) => x.id === help.convId);
+      const c = findConv(help.convId);
       showBanner(`对话“${c?.title || '另一个对话'}”中的助理在等你在浏览器里操作：${help.reason}`, 'warn');
     }
   },
@@ -196,6 +214,7 @@ async function showApp() {
   ui.app.hidden = false;
   if (store.get('aw.sb') === 'collapsed' && !narrow.matches) document.body.classList.add('sb-collapsed');
   authed = true;
+  try { state.openProjects = new Set(JSON.parse(store.get('aw.projOpen') || '[]')); } catch { /* keep none */ }
   startBrowserEvents(browserHooks);
   await Promise.all([loadModels(), refreshList()]);
   const id = location.hash.slice(1);
@@ -377,26 +396,43 @@ function openMenu(anchor, items) {
 /* ================= conversation list ================= */
 
 const LIST_PAGE = 40;
+// Without a search the main list holds the ungrouped chats; projects list their own.
 const listQuery = (extra) => {
   const p = new URLSearchParams({ limit: String(extra.limit || LIST_PAGE) });
   if (state.query.trim()) p.set('q', state.query.trim());
+  else p.set('project', 'none');
   if (extra.before) p.set('before', extra.before);
   return `/api/conversations?${p}`;
 };
+const projectChats = (id) => api(`/api/conversations?project=${encodeURIComponent(id)}`).then((d) => d.conversations);
+
+function findConv(id) {
+  return state.conversations.find((c) => c.id === id)
+    || [...state.projectConvs.values()].flat().find((c) => c.id === id) || null;
+}
+const findProject = (id) => (id && state.projects.find((p) => p.id === id)) || null;
+/** Project of the open chat (or of the new chat being drafted). */
+const currentProject = () => findProject(state.conv ? state.conv.projectId : state.draftProject);
 
 /** Reloads the top of the history, keeping as many rows as are already loaded. */
 async function refreshList() {
   const seq = (state.listSeq = (state.listSeq || 0) + 1);
   try {
     const limit = Math.min(200, Math.max(LIST_PAGE, state.conversations.length));
-    const data = await api(listQuery({ limit }));
+    const [data, proj] = await Promise.all([api(listQuery({ limit })), api('/api/projects')]);
+    const open = state.query.trim() ? [] : proj.projects.filter((p) => state.openProjects.has(p.id));
+    const lists = await Promise.all(open.map(async (p) => [p.id, await projectChats(p.id)]));
     if (seq !== state.listSeq) return;
     state.conversations = data.conversations;
     state.listCursor = data.nextCursor;
+    state.projects = proj.projects;
+    state.defaultDir = proj.defaultDir;
+    state.projectConvs = new Map(lists);
   } catch (err) {
     if (err.status !== 401) showBanner(err.message, 'error');
   }
   renderList();
+  updateChrome();
 }
 
 /** Next page when the sidebar is scrolled to its end. */
@@ -433,13 +469,96 @@ function groupOf(iso) {
   return `${d.getFullYear()}年${d.getMonth() + 1}月`;
 }
 
+function convRow(c) {
+  const li = el('li', `conv-li${state.conv?.id === c.id ? ' current' : ''}`);
+  const btn = el('button', 'conv-item');
+  btn.type = 'button';
+  btn.dataset.id = c.id;
+  if (state.conv?.id === c.id) btn.setAttribute('aria-current', 'page');
+  const label = el('span', 'conv-text');
+  label.append(el('span', 'conv-title', c.title || '新对话'));
+  const project = state.query.trim() && findProject(c.projectId);
+  if (c.snippet || project) label.append(el('span', 'conv-snippet', c.snippet || `项目：${project.name}`));
+  btn.append(label);
+  if (c.running) {
+    const dot = el('span', 'conv-running');
+    dot.title = '回复中';
+    btn.append(dot, el('span', 'sr-only', '回复中'));
+  }
+  const more = iconButton('more', `“${c.title || '新对话'}”的选项`, 'icon-btn conv-more');
+  more.dataset.id = c.id;
+  more.setAttribute('aria-haspopup', 'menu');
+  more.setAttribute('aria-expanded', 'false');
+  li.append(btn, more);
+  return li;
+}
+
+function projectSection() {
+  const box = el('section', 'proj-section');
+  box.setAttribute('aria-label', '项目');
+  const head = el('div', 'proj-head');
+  head.append(el('h2', 'conv-group-title', '项目'));
+  const add = iconButton('folder-plus', '新建项目', 'icon-btn proj-add');
+  add.dataset.action = 'new-project';
+  head.append(add);
+  box.append(head);
+  const ul = el('ul', 'conv-list');
+  if (!state.projects.length) {
+    const li = el('li', 'conv-li');
+    const b = el('button', 'conv-item proj-empty');
+    b.type = 'button';
+    b.dataset.action = 'new-project';
+    b.append(icon('folder-plus', 18), el('span', 'conv-text', '新建项目'));
+    li.append(b);
+    ul.append(li);
+  }
+  for (const p of state.projects) {
+    const open = state.openProjects.has(p.id);
+    const li = el('li', 'proj-li');
+    const row = el('div', `conv-li${!state.conv && state.draftProject === p.id ? ' current' : ''}`);
+    const btn = el('button', 'conv-item proj-item');
+    btn.type = 'button';
+    btn.dataset.project = p.id;
+    btn.setAttribute('aria-expanded', String(open));
+    btn.title = p.dir;
+    const label = el('span', 'conv-text');
+    label.append(el('span', 'conv-title', p.name));
+    btn.append(icon(open ? 'chevron-down' : 'chevron-right', 14), icon('folder', 18), label);
+    if (p.running && !open) btn.append(el('span', 'conv-running'));
+    const more = iconButton('more', `项目“${p.name}”的选项`, 'icon-btn conv-more proj-more');
+    more.dataset.project = p.id;
+    more.setAttribute('aria-haspopup', 'menu');
+    more.setAttribute('aria-expanded', 'false');
+    row.append(btn, more);
+    li.append(row);
+    if (open) {
+      const sub = el('ul', 'conv-list proj-chats');
+      const nb = el('button', 'conv-item proj-new');
+      nb.type = 'button';
+      nb.dataset.project = p.id;
+      nb.append(icon('compose', 16), el('span', 'conv-text', '新对话'));
+      const nli = el('li', 'conv-li');
+      nli.append(nb);
+      sub.append(nli);
+      const chats = state.projectConvs.get(p.id);
+      if (!chats) sub.append(el('li', 'conv-empty', '加载中…'));
+      else for (const c of chats) sub.append(convRow(c));
+      li.append(sub);
+    }
+    ul.append(li);
+  }
+  box.append(ul);
+  return box;
+}
+
 function renderList() {
   const q = state.query.trim();
   const list = state.conversations;
   listObserver.disconnect();
   ui.groups.replaceChildren();
-  ui.convEmpty.hidden = list.length > 0;
-  ui.convEmpty.textContent = q ? '没有匹配的对话' : '还没有对话';
+  ui.convEmpty.hidden = true;
+  if (!q) ui.groups.append(projectSection());
+  if (!list.length) ui.groups.append(el('p', 'conv-empty', q ? '没有匹配的对话' : (state.projects.length ? '项目之外还没有对话' : '还没有对话')));
   let group = null;
   let ul = null;
   for (const c of list) {
@@ -450,26 +569,7 @@ function renderList() {
       ul = el('ul', 'conv-list');
       ui.groups.append(ul);
     }
-    const li = el('li', `conv-li${state.conv?.id === c.id ? ' current' : ''}`);
-    const btn = el('button', 'conv-item');
-    btn.type = 'button';
-    btn.dataset.id = c.id;
-    if (state.conv?.id === c.id) btn.setAttribute('aria-current', 'page');
-    const label = el('span', 'conv-text');
-    label.append(el('span', 'conv-title', c.title || '新对话'));
-    if (c.snippet) label.append(el('span', 'conv-snippet', c.snippet));
-    btn.append(label);
-    if (c.running) {
-      const dot = el('span', 'conv-running');
-      dot.title = '回复中';
-      btn.append(dot, el('span', 'sr-only', '回复中'));
-    }
-    const more = iconButton('more', `“${c.title || '新对话'}”的选项`, 'icon-btn conv-more');
-    more.dataset.id = c.id;
-    more.setAttribute('aria-haspopup', 'menu');
-    more.setAttribute('aria-expanded', 'false');
-    li.append(btn, more);
-    ul.append(li);
+    ul.append(convRow(c));
   }
   if (state.listCursor) {
     const moreBtn = el('button', 'list-more', state.listLoading ? '加载中…' : '加载更多对话');
@@ -480,8 +580,94 @@ function renderList() {
   }
 }
 
+function saveOpenProjects() {
+  store.set('aw.projOpen', JSON.stringify([...state.openProjects]));
+}
+
+async function toggleProject(id) {
+  if (state.openProjects.delete(id)) {
+    saveOpenProjects();
+    renderList();
+    return;
+  }
+  state.openProjects.add(id);
+  saveOpenProjects();
+  renderList();
+  try {
+    state.projectConvs.set(id, await projectChats(id));
+  } catch (err) {
+    if (err.status !== 401) toast(err.message);
+  }
+  renderList();
+  ui.groups.querySelector(`.proj-item[data-project="${CSS.escape(id)}"]`)?.focus();
+}
+
+function newProject() {
+  ui.projectName.value = '';
+  ui.projectDir.value = '';
+  ui.projectHint.textContent = `目录留空时新建 ${state.defaultDir ? `${state.defaultDir}/projects/` : 'projects/'}<名称>；也可以填服务器上已有目录的绝对路径。项目里的对话都在这个目录中运行，共用其中的文件、CLAUDE.md 和记忆。`;
+  setError(ui.projectError, '');
+  ui.projectDialog.showModal();
+  ui.projectName.focus();
+}
+
+async function createProject() {
+  const name = ui.projectName.value.trim();
+  if (!name) { setError(ui.projectError, '请填写项目名称'); return; }
+  const submit = ui.projectForm.querySelector('[type="submit"]');
+  submit.disabled = true;
+  try {
+    const { project } = await api('/api/projects', { method: 'POST', body: { name, dir: ui.projectDir.value.trim() } });
+    ui.projectDialog.close();
+    state.openProjects.add(project.id);
+    saveOpenProjects();
+    newChat(project.id);
+    await refreshList();
+    toast(`已创建项目“${project.name}”`);
+  } catch (err) {
+    if (err.status !== 401) setError(ui.projectError, err.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function projectMenu(anchor, id) {
+  const p = findProject(id);
+  if (!p) return;
+  openMenu(anchor, [
+    { icon: 'compose', label: '新对话', run: () => newChat(id) },
+    { icon: 'folder', label: '浏览文件', run: () => { if (currentProject()?.id !== id) newChat(id); openFiles(); } },
+    { icon: 'pencil', label: '重命名', run: () => renameProject(id, p.name) },
+    { icon: 'trash', label: '删除项目', danger: true, run: () => removeProject(p) },
+  ]);
+}
+
+function renameProject(id, current) {
+  askName('重命名项目', current, 60, async (name) => {
+    await api(`/api/projects/${id}`, { method: 'PATCH', body: { name } });
+    await refreshList();
+  });
+}
+
+async function removeProject(p) {
+  const n = p.conversations;
+  if (!(await confirmDialog('删除项目？', `将删除项目“${p.name}”。${n ? `其中 ${n} 个对话会移到项目之外，仍在原目录中运行。` : ''}服务器上的目录 ${p.dir} 和里面的文件不会被删除。`))) return;
+  try {
+    await api(`/api/projects/${p.id}`, { method: 'DELETE' });
+    state.openProjects.delete(p.id);
+    saveOpenProjects();
+    if (state.draftProject === p.id) state.draftProject = null;
+    if (state.conv?.projectId === p.id) state.conv.projectId = null;
+    await refreshList();
+    render();
+    toast('已删除项目');
+  } catch (err) {
+    if (err.status !== 401) toast(err.message);
+  }
+}
+
 function convMenu(anchor, id) {
-  const c = state.conversations.find((x) => x.id === id) || state.conv;
+  const c = findConv(id) || state.conv;
   openMenu(anchor, [
     { icon: 'share', label: '分享', run: () => openShare(id) },
     { icon: 'gauge', label: '上下文与花费', run: () => openStatus(id) },
@@ -491,23 +677,32 @@ function convMenu(anchor, id) {
   ]);
 }
 
-function renameConversation(id, current) {
+/** The shared rename dialog: calls `save(name)` when the owner changes the name. */
+function askName(title, current, max, save) {
+  ui.renameDialog.querySelector('.dialog-title').textContent = title;
+  ui.renameInput.maxLength = max;
   ui.renameInput.value = current;
   ui.renameDialog.showModal();
   ui.renameInput.select();
   ui.renameDialog.onclose = async () => {
     if (ui.renameDialog.returnValue !== 'ok') return;
-    const title = ui.renameInput.value.trim();
-    if (!title || title === current) return;
+    const name = ui.renameInput.value.trim();
+    if (!name || name === current) return;
     try {
-      await api(`/api/conversations/${id}`, { method: 'PATCH', body: { title } });
-      if (state.conv?.id === id) state.conv.title = title;
-      await refreshList();
-      updateChrome();
+      await save(name);
     } catch (err) {
       if (err.status !== 401) toast(err.message);
     }
   };
+}
+
+function renameConversation(id, current) {
+  askName('重命名对话', current, 80, async (title) => {
+    await api(`/api/conversations/${id}`, { method: 'PATCH', body: { title } });
+    if (state.conv?.id === id) state.conv.title = title;
+    await refreshList();
+    updateChrome();
+  });
 }
 
 function confirmDialog(title, text, okText = '删除', danger = true) {
@@ -521,12 +716,12 @@ function confirmDialog(title, text, okText = '删除', danger = true) {
 }
 
 async function removeConversation(id, title) {
-  const c = state.conversations.find((x) => x.id === id);
+  const c = findConv(id);
   if (c?.running) { toast('请先停止正在进行的回复'); return; }
   if (!(await confirmDialog('删除对话？', `将删除“${title}”。删除后无法恢复。`))) return;
   try {
     await api(`/api/conversations/${id}`, { method: 'DELETE' });
-    if (state.conv?.id === id) startDraft();
+    if (state.conv?.id === id) startDraft(state.conv.projectId || null);
     await refreshList();
     toast('已删除');
   } catch (err) {
@@ -570,12 +765,13 @@ function canBranchFrom(parentId) {
   return Boolean(m.tailUuid || (m.tipKey && state.conv.tips?.[m.sessionId] === m.tipKey));
 }
 
-function startDraft() {
+function startDraft(projectId = null) {
   closeStream();
   state.conv = null;
   state.run = null;
   state.editing = null;
   state.draftSel = null;
+  state.draftProject = projectId;
   state.renderCount = MSG_PAGE;
   history.replaceState(null, '', location.pathname);
   render(true);
@@ -597,6 +793,11 @@ async function openConversation(id) {
     state.conv = conversation;
     state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : null;
     history.replaceState(null, '', `#${id}`);
+    if (conversation.projectId && !state.openProjects.has(conversation.projectId)) {
+      state.openProjects.add(conversation.projectId);
+      saveOpenProjects();
+      refreshList();
+    }
     if (conversation.run) openStream(conversation.run.id, conversation.run.seq);
   } catch (err) {
     if (err.status === 401) return;
@@ -692,6 +893,7 @@ function applyEvent(ev) {
   if (!msg) return;
   if (ev.type === 'part') {
     msg.parts[ev.index] = ev.part;
+    if (ev.part.type === 'tool' && ev.part.state !== 'running' && CHANGE_TOOLS.has(ev.part.name)) refreshFilesSoon();
     if (ev.part.type === 'approval' && ev.part.state === 'pending') {
       announce('有操作需要你的授权');
       notify(`有操作需要你的授权：${ev.part.summary || ev.part.tool || ''}`);
@@ -713,6 +915,7 @@ function applyEvent(ev) {
     else if (ev.status === 'stopped') announce('已停止');
   } else if (ev.type === 'end') {
     closeStream();
+    refreshFilesSoon();
     // Pick up session/branch metadata written at the end of the run.
     reloadCurrent();
     return;
@@ -775,6 +978,11 @@ function updateChrome() {
     || state.attachments.some((a) => a.status === 'error') || !state.models.length;
   ui.send.title = uploading ? '附件上传中…' : (live ? '追加到当前任务' : '发送');
   ui.convMenuBtn.hidden = !conv || state.loading;
+  const project = currentProject();
+  ui.projChip.hidden = !project;
+  ui.projChipName.textContent = project?.name || '';
+  ui.projChip.title = project ? `项目目录：${project.dir}（点击浏览文件）` : '';
+  setFilesRoot(project ? project.id : 'default', project?.name || '');
 }
 
 function pickFiles() {
@@ -800,7 +1008,10 @@ function renderMessages() {
   }
   const path = visiblePath();
   if (!state.conv || path.length === 0) {
-    box.append(emptyState('有什么可以帮忙的？', '可以发送文字、图片或文件。需要授权的操作，会在对话里请你确认。'));
+    const project = currentProject();
+    box.append(project
+      ? emptyState(`项目：${project.name}`, `这个对话在项目目录 ${project.dir} 中运行，和同一项目的其他对话共用这里的文件、CLAUDE.md 和记忆。Claude 写的文档可以在右侧“文件”面板里预览。`)
+      : emptyState('有什么可以帮忙的？', '可以发送文字、图片或文件。需要授权的操作，会在对话里请你确认。'));
     return;
   }
   // Long chats: only the newest messages are built; older ones on demand (scroll up / button).
@@ -1043,6 +1254,7 @@ function fillAssistant(node, msg) {
     if (part.type === 'text') {
       const div = el('div', 'md');
       div.append(renderMarkdown(part.text));
+      linkPaths(div);
       body.append(div);
     } else if (part.type === 'approval') {
       body.append(renderApproval(part, msg));
@@ -1081,6 +1293,21 @@ function fillAssistant(node, msg) {
   const badge = modelBadge(msg);
   if (badge) actions.append(badge);
   node.append(actions);
+}
+
+/** Inline code that names a file becomes a link into the file panel. */
+function linkPaths(root) {
+  for (const code of root.querySelectorAll('code')) {
+    if (code.closest('pre') || !looksLikePath(code.textContent)) continue;
+    markPath(code, code.textContent);
+  }
+}
+function markPath(node, path) {
+  node.classList.add('path-link');
+  node.dataset.path = path;
+  node.tabIndex = 0;
+  node.setAttribute('role', 'link');
+  node.title = '在文件面板中打开';
 }
 
 /** A message the owner added while this reply ran: queued, seen by Claude, or never delivered. */
@@ -1154,7 +1381,9 @@ function activityBlock(tools, running) {
     const li = el('li', `tool-li tool-${t.state}`);
     const row = el('div', 'tool-row');
     row.append(el('span', 'tool-label', toolLabel(t.name)));
-    row.append(el('span', 'tool-summary', t.summary || ''));
+    const summaryNode = el('span', 'tool-summary', t.summary || '');
+    if (PATH_TOOLS.has(t.name) && t.summary && !t.summary.endsWith('…')) markPath(summaryNode, t.summary);
+    row.append(summaryNode);
     row.append(el('span', 'tool-state', { running: '进行中', done: '完成', error: '失败' }[t.state] || ''));
     li.append(row);
     if (t.detail) li.append(el('pre', 'tool-detail', t.detail));
@@ -1251,7 +1480,9 @@ function selBody() {
 async function ensureConversation() {
   if (state.conv) return state.conv.id;
   const sel = currentSel();
-  const { conversation } = await api('/api/conversations', { method: 'POST', body: { model: sel.model, effort: sel.effort || undefined } });
+  const { conversation } = await api('/api/conversations', {
+    method: 'POST', body: { model: sel.model, effort: sel.effort || undefined, projectId: state.draftProject || undefined },
+  });
   state.conv = { ...conversation, messages: [], leafId: null, run: null };
   history.replaceState(null, '', `#${conversation.id}`);
   return conversation.id;
@@ -1506,8 +1737,8 @@ function autosize() {
   updateChrome();
 }
 
-function newChat() {
-  startDraft();
+function newChat(projectId = null) {
+  startDraft(projectId);
   if (narrow.matches) setDrawer(false);
 }
 
@@ -1567,8 +1798,9 @@ $('open-tasks').addEventListener('click', () => { if (narrow.matches) setDrawer(
 $('open-settings').addEventListener('click', () => { if (narrow.matches) setDrawer(false); openSettings(); });
 $('perm-chip').addEventListener('click', () => openSettings());
 initResizers();
+initFiles({ api, toast, openBrowser, openViewer, closeBrowser: () => closeBrowser({ focus: false }) });
 initExtras({
-  api, toast, openMenu, newChat, openModelPop, openBrowser, pickFiles, setComposer, sendCommand,
+  api, toast, openMenu, newChat: () => newChat(currentProject()?.id || null), openModelPop, openBrowser, openFiles, pickFiles, setComposer, sendCommand,
   input: () => ui.input,
   currentConv: () => (state.conv?.id ? { id: state.conv.id, live: isLive() } : null),
   models: () => state.models,
@@ -1583,7 +1815,8 @@ ui.fileInput.addEventListener('change', () => {
   ui.fileInput.value = '';
 });
 ui.stop.addEventListener('click', stop);
-for (const b of [ui.newChat, ui.sbNew, ui.topNew]) b.addEventListener('click', newChat);
+// The new chat buttons stay in the current project, as in its sidebar section.
+for (const b of [ui.newChat, ui.sbNew, ui.topNew]) b.addEventListener('click', () => newChat(b === ui.newChat ? null : currentProject()?.id || null));
 ui.sbCollapse.addEventListener('click', toggleSidebar);
 ui.menu.addEventListener('click', toggleSidebar);
 ui.scrim.addEventListener('click', () => setDrawer(false));
@@ -1608,6 +1841,13 @@ ui.logout.addEventListener('click', async () => {
   showLogin();
 });
 ui.groups.addEventListener('click', (e) => {
+  if (e.target.closest('[data-action="new-project"]')) { newProject(); return; }
+  const pmore = e.target.closest('.proj-more');
+  if (pmore) { projectMenu(pmore, pmore.dataset.project); return; }
+  const pnew = e.target.closest('.proj-new');
+  if (pnew) { newChat(pnew.dataset.project); return; }
+  const pitem = e.target.closest('.proj-item');
+  if (pitem) { toggleProject(pitem.dataset.project); return; }
   const more = e.target.closest('.conv-more');
   if (more) { convMenu(more, more.dataset.id); return; }
   const btn = e.target.closest('.conv-item');
@@ -1617,6 +1857,8 @@ ui.groups.addEventListener('click', (e) => {
 });
 ui.convMenuBtn.addEventListener('click', () => state.conv && convMenu(ui.convMenuBtn, state.conv.id));
 ui.messages.addEventListener('click', (e) => {
+  const pathLink = e.target.closest('.path-link');
+  if (pathLink) { openPath(pathLink.dataset.path); return; }
   const view = e.target.closest('a[data-view]');
   if (view && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
     e.preventDefault();
@@ -1635,6 +1877,13 @@ ui.messages.addEventListener('click', (e) => {
   else if (action === 'open-browser') openBrowser();
   else if (action === 'refill') setComposer(btn.dataset.text || '');
 });
+ui.messages.addEventListener('keydown', (e) => {
+  const pathLink = e.key === 'Enter' && e.target.closest('.path-link');
+  if (pathLink) { e.preventDefault(); openPath(pathLink.dataset.path); }
+});
+ui.projChip.addEventListener('click', () => openFiles());
+ui.projectForm.addEventListener('submit', (e) => { e.preventDefault(); createProject(); });
+$('project-cancel').addEventListener('click', () => ui.projectDialog.close());
 ui.scroller.addEventListener('scroll', () => {
   const d = distanceFromBottom();
   state.stick = d < 80;

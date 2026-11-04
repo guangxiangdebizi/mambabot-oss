@@ -154,6 +154,12 @@ async function onUser(content) {
     result(s);
     return;
   }
+  if (text.includes('cwd?')) {
+    const s = `cwd=${process.cwd()}`;
+    streamText('msg_c', [s]);
+    result(s);
+    return;
+  }
   if (text.includes('echo')) {
     streamText('msg_e', [`echo:${text}`]);
     result('echo');

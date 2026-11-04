@@ -66,14 +66,17 @@ export class RunManager {
    * @param content string or Claude content blocks for the user turn
    * @param opts.model / opts.effort  validated selection, passed to the CLI as-is
    * @param opts.resume  { sessionId, at?, fork? } from resumePlan()
+   * @param opts.cwd  the chat's working directory (its project's); the default one otherwise
+   * @param opts.project  { name } of the chat's project, mentioned to Claude
    */
   start(conv, message, content, {
     model = '', effort = '', resume = null, runId = randomUUID(), extraArgs = [], permissionMode = 'manual',
+    cwd = this.cfg.claudeCwd, project = null,
   } = {}) {
     const mode = PERMISSION_MODES.includes(permissionMode) ? permissionMode : 'manual';
     if (this.shuttingDown) throw new Error('服务正在重启');
     const run = {
-      id: runId, conv, msg: message, seq: 0, events: [], listeners: new Set(),
+      id: runId, conv, msg: message, cwd, seq: 0, events: [], listeners: new Set(),
       approvals: new Map(), stopRequested: false, finished: false, stderr: '', killTimers: [],
       // uuids of the user messages written to this process; their replays are not transcript tails.
       sent: new Set(), inputClosed: false,
@@ -95,7 +98,7 @@ export class RunManager {
       '--permission-mode', mode, '--permission-prompt-tool', 'stdio',
       // Session-scoped cron dies with this one-reply process; scheduled work uses assistant-tasks.
       '--disallowedTools', 'AskUserQuestion,CronCreate,CronDelete,CronList,ScheduleWakeup',
-      '--append-system-prompt', this.handoff(mode),
+      '--append-system-prompt', this.handoff(mode, cwd, project),
     ];
     if (resume?.sessionId) {
       args.push('--resume', resume.sessionId);
@@ -107,7 +110,7 @@ export class RunManager {
     args.push(...extraArgs);
 
     const child = this.spawnImpl(this.cfg.claudeBin, args, {
-      cwd: this.cfg.claudeCwd,
+      cwd,
       env: { ...process.env, NO_COLOR: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -138,9 +141,10 @@ export class RunManager {
     return run;
   }
 
-  handoff(mode) {
+  handoff(mode, cwd = this.cfg.claudeCwd, project = null) {
     return [
-      ...HANDOFF, `工作目录：${this.cfg.claudeCwd}。`,
+      ...HANDOFF,
+      project ? `这个对话属于项目“${project.name}”，工作目录就是项目目录：${cwd}。项目的文件、文档和 CLAUDE.md 都放在这里，所有者可以在网页右侧的“文件”面板里浏览和预览。` : `工作目录：${cwd}。`,
       ...(this.cfg.browserEnabled ? BROWSER_HANDOFF : []), ...TOOLS_HANDOFF,
       ...(this.handoffExtra ? [this.handoffExtra] : []), MODE_NOTE[mode],
     ].join('\n');
@@ -153,6 +157,11 @@ export class RunManager {
     if (want && msg.modelUsed && msg.modelUsed !== want) {
       run.translator.pushPart({ type: 'notice', text: `注意：运行时实际使用的是 ${msg.modelUsed}，不是所选的 ${want}。` });
     }
+  }
+
+  /** Working directory of a live run (relative paths from its tools resolve against it). */
+  cwdOf(runId) {
+    return [...this.active.values()].find((r) => r.id === runId)?.cwd || null;
   }
 
   /** A file Claude chose to show (assistant-media show_file), added to that run's reply. */

@@ -77,6 +77,7 @@ function onSnapshot(next) {
 export function isOpen() { return !ui.panel.hidden; }
 
 export function open() {
+  hooks.onOpen?.();
   wantOpen = true;
   ui.panel.hidden = false;
   document.body.classList.add('bp-open');
@@ -86,14 +87,15 @@ export function open() {
   if (window.matchMedia('(max-width: 767px)').matches) ui.back.focus();
 }
 
-export function close() {
+export function close({ focus = true } = {}) {
+  if (ui.panel.hidden) return;
   wantOpen = false;
   ui.panel.hidden = true;
   document.body.classList.remove('bp-open');
   ui.chip.setAttribute('aria-expanded', 'false');
   // Stop streaming frames when nobody is looking; the browser itself keeps running.
   disconnect();
-  ui.chip.focus();
+  if (focus) ui.chip.focus();
 }
 
 function render() {
@@ -269,8 +271,8 @@ async function act(kind) {
 }
 
 ui.chip.addEventListener('click', () => (isOpen() ? close() : open()));
-ui.close.addEventListener('click', close);
-ui.back.addEventListener('click', close);
+ui.close.addEventListener('click', () => close());
+ui.back.addEventListener('click', () => close());
 ui.fit.addEventListener('click', () => setFit(!fit));
 ui.power.addEventListener('click', () => act('stop'));
 ui.overlayBtn.addEventListener('click', () => act(ui.overlayBtn.dataset.act));

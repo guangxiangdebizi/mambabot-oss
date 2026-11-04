@@ -1081,6 +1081,7 @@ export function openPlusMenu(anchor) {
   h.openMenu(anchor, [
     { icon: 'file', label: '上传文件或图片', run: () => h.pickFiles() },
     { icon: 'slash', label: '指令', run: () => h.setComposer('/') },
+    { icon: 'folder', label: '文件', run: () => h.openFiles() },
     { icon: 'globe', label: '浏览器', run: () => h.openBrowser() },
     { icon: 'clock', label: '定时任务', run: () => openTasks() },
     { icon: 'collapse', label: '上下文与花费', run: () => openStatus() },

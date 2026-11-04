@@ -74,8 +74,10 @@ function setup({ handle, target, cssVar, key, min, cap = Infinity, otherWidth, g
 
 export function initResizers() {
   const sidebar = document.getElementById('sidebar');
-  const panel = document.getElementById('browser-panel');
-  const visibleWidth = (node) => (node.hidden || getComputedStyle(node).visibility === 'hidden' ? 0 : node.getBoundingClientRect().width);
+  // The browser and file panels share one slot (and width) on the right.
+  const panels = [document.getElementById('browser-panel'), document.getElementById('files-panel')];
+  const panel = { get hidden() { return panels.every((p) => p.hidden); }, getBoundingClientRect: () => (panels.find((p) => !p.hidden) || panels[0]).getBoundingClientRect() };
+  const visibleWidth = (node) => (node.hidden || (node instanceof Element && getComputedStyle(node).visibility === 'hidden') ? 0 : node.getBoundingClientRect().width);
   const sb = setup({
     handle: document.getElementById('sb-resize'), target: sidebar, cssVar: '--sidebar-w', key: 'aw.sbw',
     min: 200, cap: 420, grows: 'right', otherWidth: () => visibleWidth(panel),

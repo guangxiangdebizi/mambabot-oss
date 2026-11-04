@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createReadStream } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -18,6 +19,7 @@ import { ContextProbe, sessionCost } from './context.js';
 import { MEDIA_SERVER, MediaMcp } from './media.js';
 import { TASK_SERVER, TaskMcp, TaskScheduler, describeCron, nextRun, parseCron } from './schedule.js';
 import { ShareStore, TOKEN_RE } from './shares.js';
+import { DEFAULT_ROOT, FileError, ProjectStore } from './projects.js';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 const COOKIE = 'aw_session';
@@ -94,7 +96,7 @@ async function readBody(req) {
 
 const summary = (conv, runs) => ({
   id: conv.id, title: conv.title, updatedAt: conv.updatedAt, running: runs.isRunning(conv.id),
-  settings: conv.settings || { model: null, effort: null },
+  settings: conv.settings || { model: null, effort: null }, projectId: conv.projectId || null,
 });
 
 /** About 60 characters of message text around the first match of `q` (lowercase), or null. */
@@ -147,7 +149,11 @@ export async function createApp(cfg = loadConfig(), log = console) {
       models: catalog.models.map((m) => ({ value: m.value, name: m.displayName, efforts: m.efforts })),
     }),
   });
-  const mediaMcp = new MediaMcp({ cfg, uploads, show: async (runId, file) => runs.addFile(runId, file) });
+  const mediaMcp = new MediaMcp({ cfg, uploads, show: async (runId, file) => runs.addFile(runId, file), cwdOf: (runId) => runs.cwdOf(runId) });
+  const projects = new ProjectStore(cfg);
+  await projects.load();
+  // A chat keeps the directory it was created in (Claude sessions are stored per directory).
+  const cwdOf = (conv) => conv.cwd || cfg.claudeCwd;
   const shares = new ShareStore(cfg.dataDir);
   await shares.load();
   const runMcpDir = join(cfg.dataDir, 'run-mcp');
@@ -278,8 +284,10 @@ export async function createApp(cfg = loadConfig(), log = console) {
     }
     // Listing tasks and showing the owner a file are read-only for the owner, so pre-approved.
     const extraArgs = ['--mcp-config', mcpFile, '--allowedTools', `mcp__${TASK_SERVER}__list_scheduled_tasks,mcp__${MEDIA_SERVER}__show_file`];
+    const project = conv.projectId ? projects.get(conv.projectId) : null;
     const run = runs.start(conv, assistantMessage, content, {
       model: sel.model, effort: sel.effort, resume, runId, extraArgs, permissionMode: prefs.permissionMode,
+      cwd: cwdOf(conv), project: project && { name: project.name },
     });
     return { assistantMessage, run };
   }
@@ -399,7 +407,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       contextError = plan.error;
     } else {
       try {
-        context = await contextProbe.get({ resume: plan.resume, model: sel.model });
+        context = await contextProbe.get({ resume: plan.resume, model: sel.model, cwd: cwdOf(conv) });
       } catch (err) {
         contextError = err.message;
       }
@@ -408,7 +416,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     // total over all branches is the sum over its sessions, including replies made before the
     // web page recorded per-reply cost.
     const sessionIds = [...new Set(conv.messages.filter((m) => m.role === 'assistant' && m.sessionId).map((m) => m.sessionId))];
-    const costs = await Promise.all(sessionIds.map((id) => sessionCost(cfg, id)));
+    const costs = await Promise.all(sessionIds.map((id) => sessionCost(cfg, id, cwdOf(conv))));
     const cli = sessionIds.length ? {
       costUsd: Math.round(costs.reduce((a, c) => a + (c?.costUsd || 0), 0) * 1e6) / 1e6,
       sessions: sessionIds.length, missing: costs.filter((c) => !c).length,
@@ -494,6 +502,10 @@ export async function createApp(cfg = loadConfig(), log = console) {
   function listConversations(res, url) {
     const q = (url.searchParams.get('q') || '').trim().toLowerCase();
     let list = store.list().slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id));
+    // `project=<id>` one project's chats, `project=none` the ungrouped ones; all when absent.
+    const project = url.searchParams.get('project');
+    if (project === 'none') list = list.filter((c) => !c.projectId);
+    else if (project) list = list.filter((c) => c.projectId === project);
     // Titles first; otherwise the text of any message (all branches), with a short excerpt.
     const snippets = new Map();
     if (q) {
@@ -564,6 +576,72 @@ export async function createApp(cfg = loadConfig(), log = console) {
       return wrap(async () => sendJson(res, 200, { task: await scheduler.runNow(tm[1]), ...tasksPayload() }));
     }
     throw new HttpError(405, '不支持的请求方法');
+  }
+
+  const projectView = (p) => {
+    const convs = store.list().filter((c) => c.projectId === p.id);
+    return { ...p, conversations: convs.length, running: convs.some((c) => runs.isRunning(c.id)) };
+  };
+  const projectsPayload = () => ({ projects: projects.list().map(projectView), defaultDir: cfg.claudeCwd });
+
+  /** Projects, and read-only browsing of a project's directory (or the default one). */
+  async function projectsApi(req, res, url, method) {
+    const wrap = async (fn) => {
+      try {
+        return await fn();
+      } catch (err) {
+        if (err instanceof FileError) throw new HttpError(err.status, err.message);
+        throw err;
+      }
+    };
+    const path = url.pathname;
+    if (path === '/api/projects') {
+      if (method === 'GET') return sendJson(res, 200, projectsPayload());
+      if (method === 'POST') {
+        const body = await readBody(req);
+        return wrap(async () => {
+          const project = await projects.create({ name: body.name, dir: body.dir });
+          log.info(`新建项目 ${project.name} -> ${project.dir}`);
+          return sendJson(res, 201, { project: projectView(project), ...projectsPayload() });
+        });
+      }
+      throw new HttpError(405, '不支持的请求方法');
+    }
+    const pm = path.match(/^\/api\/projects\/([^/]+)(?:\/(tree|file|raw))?$/);
+    if (!pm || !(ID_RE.test(pm[1]) || (pm[1] === DEFAULT_ROOT && pm[2]))) throw new HttpError(404, '接口不存在');
+    const [, key, action] = pm;
+    if (!action && method === 'PATCH') {
+      const body = await readBody(req);
+      return wrap(async () => { await projects.rename(key, body.name); return sendJson(res, 200, projectsPayload()); });
+    }
+    if (!action && method === 'DELETE') {
+      if (!projects.get(key)) throw new HttpError(404, '项目不存在');
+      // Its chats become ungrouped but keep running in the project's directory.
+      for (const conv of store.list().filter((c) => c.projectId === key)) {
+        delete conv.projectId;
+        await store.saveNow(conv);
+      }
+      await projects.remove(key);
+      return sendJson(res, 200, projectsPayload());
+    }
+    if (method !== 'GET' || !action) throw new HttpError(405, '不支持的请求方法');
+    const rel = url.searchParams.get('path') || '';
+    return wrap(async () => {
+      if (action === 'tree') return sendJson(res, 200, { root: projects.rootDir(key), ...(await projects.listDir(key, rel)) });
+      if (action === 'file') return sendJson(res, 200, { file: await projects.preview(key, rel) });
+      const file = await projects.raw(key, rel);
+      const inline = file.type && url.searchParams.get('download') !== '1';
+      res.writeHead(200, {
+        'Content-Type': inline ? file.type : 'application/octet-stream',
+        'Content-Length': file.size,
+        'Cache-Control': 'no-cache',
+        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+        // An SVG opened on its own must not run scripts in this origin.
+        ...(file.type === 'image/svg+xml' ? { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox" } : {}),
+      });
+      createReadStream(file.path).on('error', () => res.destroy()).pipe(res);
+      return undefined;
+    });
   }
 
   /**
@@ -685,7 +763,17 @@ export async function createApp(cfg = loadConfig(), log = console) {
           try { catalog.validate(String(body.model), body.effort ? String(body.effort) : null); } catch (err) { throw new HttpError(400, err.message); }
           settings = { model: String(body.model), effort: body.effort ? String(body.effort) : null };
         }
-        return sendJson(res, 201, { conversation: summary(await store.create(settings), runs) });
+        let project = null;
+        if (body.projectId) {
+          project = projects.get(String(body.projectId));
+          if (!project) throw new HttpError(400, '项目不存在');
+        }
+        const conv = await store.create(settings);
+        if (project) {
+          Object.assign(conv, { projectId: project.id, cwd: project.dir });
+          await store.saveNow(conv);
+        }
+        return sendJson(res, 201, { conversation: summary(conv, runs) });
       }
     }
     if (path === '/api/models' && method === 'GET') return sendJson(res, 200, { ...catalog.publicList(), prefs });
@@ -736,6 +824,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       return sendJson(res, 200, { ...(await memory()), activeRuns: runs.activeCount, maxRuns: maxRuns(), maxRunsCap: MAX_RUNS_CAP });
     }
     if (path.startsWith('/api/tasks')) return tasksApi(req, res, path, method);
+    if (path === '/api/projects' || path.startsWith('/api/projects/')) return projectsApi(req, res, url, method);
     if (path.startsWith('/api/browser')) return browserApi(req, res, path, method);
     if (path === '/api/uploads' && method === 'POST') return upload(req, res);
     const um = path.match(/^\/api\/uploads\/([^/]+)$/);

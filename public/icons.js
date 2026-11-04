@@ -36,6 +36,9 @@ const PATHS = {
   power: ['M12 3v8', 'M6.3 6.3a8 8 0 1 0 11.4 0'],
   back: ['M19 12H5', 'M11 6l-6 6 6 6'],
   alert: ['M12 3l9.5 17h-19z', 'M12 10v4', 'M12 17h.01'],
+  folder: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'],
+  'folder-plus': ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', 'M12 10.5v5', 'M9.5 13h5'],
+  download: ['M12 4v11', 'M7 10l5 5 5-5', 'M5 20h14'],
 };
 
 const NS = 'http://www.w3.org/2000/svg';

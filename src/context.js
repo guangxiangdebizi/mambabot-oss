@@ -32,12 +32,12 @@ export class ContextProbe {
   }
 
   /** @param resume { sessionId, at? } or null for a chat with no Claude session yet */
-  get({ resume = null, model = '' } = {}) {
-    const key = `${resume?.sessionId || '-'}|${resume?.at || ''}|${model}`;
+  get({ resume = null, model = '', cwd = this.cfg.claudeCwd } = {}) {
+    const key = `${resume?.sessionId || '-'}|${resume?.at || ''}|${model}|${cwd}`;
     const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < FRESH_MS) return Promise.resolve(hit.value);
     if (this.inflight.has(key)) return this.inflight.get(key);
-    const p = this.probe(resume, model).then((value) => {
+    const p = this.probe(resume, model, cwd).then((value) => {
       this.cache.set(key, { at: Date.now(), value });
       if (this.cache.size > 50) this.cache.delete(this.cache.keys().next().value);
       return value;
@@ -46,7 +46,7 @@ export class ContextProbe {
     return p;
   }
 
-  probe(resume, model) {
+  probe(resume, model, cwd = this.cfg.claudeCwd) {
     return new Promise((resolve, reject) => {
       const args = [
         ...this.cfg.claudePrefixArgs,
@@ -59,7 +59,7 @@ export class ContextProbe {
       }
       if (model) args.push('--model', model);
       const child = this.spawnImpl(this.cfg.claudeBin, args, {
-        cwd: this.cfg.claudeCwd, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'ignore'],
+        cwd, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'ignore'],
       });
       let buf = '';
       let done = false;
@@ -101,11 +101,11 @@ const MAX_SCAN_BYTES = 64 * 1024 * 1024;
 /**
  * The CLI's own running total for one session (what the terminal's /cost shows): it appends a
  * cumulative `cost-state` entry to the session file after every reply; a fork starts from zero.
- * Null when absent.
+ * Null when absent. Session files live under the directory the chat runs in.
  */
-export async function sessionCost(cfg, sessionId) {
+export async function sessionCost(cfg, sessionId, cwd = cfg.claudeCwd) {
   if (!/^[0-9a-f-]{36}$/.test(sessionId || '')) return null;
-  const file = join(cfg.claudeProjectsDir, cfg.claudeCwd.replace(/[^A-Za-z0-9]/g, '-'), `${sessionId}.jsonl`);
+  const file = join(cfg.claudeProjectsDir, cwd.replace(/[^A-Za-z0-9]/g, '-'), `${sessionId}.jsonl`);
   let fh;
   try {
     fh = await open(file, 'r');

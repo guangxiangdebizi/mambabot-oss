@@ -33,7 +33,7 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   `/api/commands`). Session settings that would not outlive a one-reply process (`/model`,
   `/effort`, `/usage`, `/clear`, `/rename`) are handled by the page instead; terminal-only
   ones (`/color`, `/loop`, `/mcp`, …) are hidden; `/compact` is passed through to the CLI. The `+` button opens upload, commands,
-  browser, scheduled tasks and usage.
+  files, browser, scheduled tasks and usage.
 - **`/compact` and `/status`**: `/compact [要保留的重点]` is sent to the CLI as the next turn of
   the branch (it runs its own compaction in that session); the reply shows a compaction note
   with the CLI's before/after token counts, and its replayed "Compacted" entry becomes the
@@ -45,6 +45,23 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   `total_cost_usd` and tokens of its `result` (`msg.usage`), and the chat total sums the CLI's
   own cumulative `cost-state` entry of each session file (forks start at zero), so replies
   from before this feature are counted too. Amounts are API list-price equivalents.
+- **Projects and the file panel** (`src/projects.js`, `public/files.js`): a project is a
+  name and a directory (`projects.json` in the data dir); by default a new folder
+  `<claude cwd>/projects/<name>`, or an existing absolute path. Neither may contain or sit
+  inside the config dir, the data dir, `~/.ssh` or `~/.claude`. A chat created in a project
+  stores `projectId` and `cwd`; every run (and the `/status` probe, the session cost lookup
+  and relative `show_file` paths) uses the chat's `cwd`, because Claude Code keeps sessions
+  per working directory. The directory therefore never changes for a chat: deleting a project
+  only ungroups its chats (they keep their `cwd`) and leaves the folder on disk. The handoff
+  tells Claude the project's name and directory. The sidebar lists projects above the
+  ungrouped chats (`GET /api/conversations?project=<id>|none`). The file panel shares the
+  browser panel's slot and reads `GET /api/projects/<id|default>/{tree,file,raw}?path=`:
+  paths are relative to the root or absolute inside it, resolved with `realpath` and refused
+  outside the root (no symlink escapes); `.git`, `.ssh`, `.env*`, private keys and the like
+  are neither listed nor served. `file` returns up to 512 KB of text (Markdown or plain,
+  NUL-sniffed for binaries), `raw` serves images inline (SVG under a sandbox CSP) and
+  everything else as a download. The panel reloads after a reply's file-changing tool calls
+  and at the end of a run, and inline code in replies that looks like a path opens it.
 - **Showing files** (`src/media.js`): every run gets an `assistant-media` MCP server
   (`/internal/mcp/media`, loopback only, per-run token, pre-approved) with one tool,
   `show_file(path, caption?)`. The file (≤ 20 MB, ≤ 20 per reply) is copied into the upload

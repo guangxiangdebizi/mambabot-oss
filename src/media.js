@@ -32,8 +32,8 @@ export class MediaMcp {
    * @param show (runId, file) => Promise<boolean>  adds the copied upload to that run's reply;
    *   false when the run is gone
    */
-  constructor({ cfg, uploads, show }) {
-    Object.assign(this, { cfg, uploads, show });
+  constructor({ cfg, uploads, show, cwdOf = null }) {
+    Object.assign(this, { cfg, uploads, show, cwdOf });
     this.tokens = new Map();
     this.counts = new Map();
     // Credentials never leave the host through this tool, even if a page or file asks for it.
@@ -65,7 +65,7 @@ export class MediaMcp {
     if (!raw) throw new Error('缺少 path');
     let path;
     try {
-      path = await realpath(isAbsolute(raw) ? raw : join(this.cfg.claudeCwd, raw));
+      path = await realpath(isAbsolute(raw) ? raw : join(this.cwdOf?.(runId) || this.cfg.claudeCwd, raw));
     } catch {
       throw new Error(`文件不存在：${raw}`);
     }

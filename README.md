@@ -36,6 +36,12 @@ MambaBot 是一个自托管、单用户的网页界面，用来使用你服务�
   <img src="docs/screenshots/desktop-dark.png" alt="深色模式下的代码块" width="49%">
 </p>
 
+### 项目和文件面板
+
+- **项目**：侧边栏可以新建项目。每个项目对应服务器上的一个目录：默认新建 `<工作目录>/projects/<项目名>`，也可以指定已有目录。项目里的对话都以这个目录为工作目录运行 `claude -p`，所以共用其中的文件、项目级 `CLAUDE.md` 和 Claude Code 的记忆，不用每次重新交代背景。不用项目时一切照旧。
+- **文件面板**：右侧的“文件”面板（和浏览器面板切换）显示当前项目的目录树。Markdown 渲染成排版后的页面（可切换源码），代码和文本带行号，图片直接显示，其他文件可以下载。Claude 改完文件后面板自动刷新；回复里提到的文件路径可以点击打开。手机上全屏显示。
+- 面板只读，不在网页里编辑。只能访问项目目录内的文件，符号链接也不能跳出目录；`.env`、私钥、`.ssh`、`.git` 等不显示，也不能作为项目目录选中服务配置和数据目录。
+
 ### 安全：每一步都在你眼皮底下
 
 - **授权卡片**：所有需要授权的工具调用（运行命令、写文件、联网……）都会变成一张卡片，上面是完整的命令或文件内容，由你允许或拒绝。服务器从不替你点"允许"。
@@ -144,6 +150,7 @@ existing Claude Code login. It includes:
 
 - model and effort picker, branching chats (edit/regenerate fork the CLI session), attachments, and Claude showing you images and files inline
 - approval cards for every permission prompt, with four permission modes
+- projects: chats grouped by a server directory that is their working directory (shared files, `CLAUDE.md` and memory), with a read-only file panel (Markdown rendered, code with line numbers, images, downloads; clickable paths in replies)
 - `/compact`, `/status` (context window and spend), scheduled tasks via cron, plan usage, and an optional live BrowserOS panel with human hand-off for logins and captchas
 
 Quick start: `node src/server.js`, then log in with the secret in `~/.config/assistant-web/initial-login-secret`.

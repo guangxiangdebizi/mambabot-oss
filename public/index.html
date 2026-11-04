@@ -63,8 +63,12 @@
           <span id="model-btn-effort" class="model-btn-effort"></span>
           <span class="model-btn-caret" data-icon="chevron-down" aria-hidden="true"></span>
         </button>
+        <button id="proj-chip" type="button" class="proj-chip" hidden><span data-icon="folder" aria-hidden="true"></span><span id="proj-chip-name" class="proj-chip-name"></span></button>
         <h1 id="chat-title" class="chat-title sr-only">新对话</h1>
         <div class="topbar-spacer"></div>
+        <button id="files-btn" type="button" class="top-chip" aria-controls="files-panel" aria-expanded="false">
+          <span data-icon="folder" aria-hidden="true"></span><span id="files-btn-text" class="top-chip-text">文件</span>
+        </button>
         <button id="browser-btn" type="button" class="top-chip" aria-controls="browser-panel" aria-expanded="false">
           <span data-icon="globe" aria-hidden="true"></span><span class="top-chip-text">浏览器</span><span id="browser-dot" class="dot" hidden></span>
         </button>
@@ -103,7 +107,10 @@
     <aside id="browser-panel" class="bpanel" aria-labelledby="bp-heading" hidden>
       <div class="bp-head">
         <button id="bp-back" type="button" class="bp-back" data-icon-lead="back"><span>返回对话</span></button>
-        <h2 id="bp-heading" class="bp-heading">浏览器</h2>
+        <div class="panel-tabs" role="group" aria-label="右侧面板">
+          <button type="button" class="panel-tab" data-panel="files">文件</button>
+          <h2 id="bp-heading" class="panel-tab current" aria-current="true">浏览器</h2>
+        </div>
         <span id="bp-status" class="bp-pill" role="status"></span>
         <div class="topbar-spacer"></div>
         <button id="bp-fit" type="button" class="icon-btn" aria-label="原始大小" title="原始大小（可拖动查看）" data-icon="expand"></button>
@@ -134,6 +141,32 @@
       <div class="bp-foot">
         <p id="bp-foot-text" class="bp-foot-text"></p>
         <button id="bp-action" type="button" class="btn btn-primary btn-sm"></button>
+      </div>
+    </aside>
+    <aside id="files-panel" class="bpanel fpanel" aria-labelledby="fp-heading" hidden>
+      <div class="bp-head">
+        <button id="fp-back" type="button" class="bp-back" data-icon-lead="back"><span>返回对话</span></button>
+        <div class="panel-tabs" role="group" aria-label="右侧面板">
+          <h2 id="fp-heading" class="panel-tab current" aria-current="true">文件</h2>
+          <button type="button" class="panel-tab" data-panel="browser">浏览器</button>
+        </div>
+        <div class="topbar-spacer"></div>
+        <button id="fp-refresh" type="button" class="icon-btn" aria-label="刷新" title="刷新" data-icon="refresh"></button>
+        <button id="fp-close" type="button" class="icon-btn bp-close" aria-label="收起文件面板" title="收起" data-icon="x"></button>
+      </div>
+      <div class="fp-root">
+        <span data-icon="folder" aria-hidden="true"></span>
+        <span class="fp-root-text"><span id="fp-root-name" class="fp-root-name"></span><span id="fp-root-dir" class="fp-root-dir"></span></span>
+      </div>
+      <div id="fp-tree" class="fp-tree" role="tree" aria-labelledby="fp-heading"></div>
+      <div id="fp-view" class="fp-view" hidden>
+        <div class="fp-view-bar">
+          <button id="fp-up" type="button" class="icon-btn" aria-label="返回目录" title="返回目录" data-icon="back"></button>
+          <span id="fp-path" class="fp-path"></span>
+          <button id="fp-source" type="button" class="btn btn-ghost btn-sm" hidden>源码</button>
+          <a id="fp-download" class="icon-btn" aria-label="下载" title="下载" data-icon="download"></a>
+        </div>
+        <div id="fp-body" class="fp-body"></div>
       </div>
     </aside>
   </div>
@@ -169,6 +202,21 @@
       <div class="dialog-actions">
         <button type="button" class="btn btn-ghost" value="cancel" id="rename-cancel">取消</button>
         <button type="submit" class="btn btn-primary" value="ok">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="project-dialog" class="dialog">
+    <form method="dialog" id="project-form">
+      <h2 class="dialog-title">新建项目</h2>
+      <label for="project-name" class="field-label">名称</label>
+      <input id="project-name" maxlength="60" required autocomplete="off">
+      <label for="project-dir" class="field-label">目录（可选）</label>
+      <input id="project-dir" autocomplete="off" spellcheck="false" placeholder="留空则新建文件夹">
+      <p id="project-hint" class="dialog-text"></p>
+      <p id="project-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" id="project-cancel">取消</button>
+        <button type="submit" class="btn btn-primary" value="ok">创建</button>
       </div>
     </form>
   </dialog>
