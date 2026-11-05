@@ -18,7 +18,7 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 > 再用 `show_file` 工具把图片直接显示在回复里。
 
 - **零依赖**：一个 Node.js 进程，没有 npm 依赖，也没有构建步骤。
-- **用的就是你的 Claude Code**：每条回复启动一次 `claude -p`，订阅登录和 API Key 都可以用，权限规则和 CLI 完全一致。
+- **用的就是你的 Claude Code**：每条回复启动一次官方原版的 `claude -p`，订阅登录和 API Key 都可以用，权限规则和 CLI 完全一致。MambaBot 不经手你的 Claude 登录凭据（见[账号与 Anthropic 条款](#账号与-anthropic-条款)）。
 - **随时随地**：适配手机屏幕，可以添加到主屏幕；回复完成或需要授权时可以发通知提醒你。
 - **一切看得见**：项目文件、Claude 跑过的每条命令和输出、它正在用的浏览器，都在右侧面板里实时可见，你也可以自己动手。
 
@@ -101,7 +101,7 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 
 - 一台 Linux 服务器（每条进行中的回复大约占 400 MB 内存，同时回复的数量可以在设置里调）
 - Node.js ≥ 22
-- 已安装并登录的 Claude Code CLI（`claude` 能正常对话即可，订阅登录或 `ANTHROPIC_API_KEY` 都行）
+- 已安装并登录的 Claude Code CLI（`claude` 能正常对话即可，订阅登录或 `ANTHROPIC_API_KEY` 都行）。订阅登录请在服务器上用 `claude` 自己的 `/login` 完成，MambaBot 没有、也不会提供 Claude 账号登录入口
 - 想从外网访问的话，还需要一个域名，并配置好 nginx + HTTPS
 
 ### 运行
@@ -159,6 +159,27 @@ MambaBot 让一个网页登录直接拥有服务器上那个用户的全部能�
 
 ---
 
+## 账号与 Anthropic 条款
+
+MambaBot 只是官方 Claude Code 的一个网页前端，用的是你自己的账号，所以 Anthropic 的条款照样适用于你。违反条款可能导致账号被暂停或封禁，而且申诉很难成功。
+
+**MambaBot 自己的做法**
+
+- 只调用 Anthropic 发布的原版 `claude` CLI，不修改它，也不替换它的登录方式。
+- 不读取、不保存、不转发你的 Claude 登录凭据：登录完全由 `claude` 自己的 `/login` 流程完成；网页登录密钥只用来进 MambaBot，和 Claude 账号无关；`~/.claude/.credentials.json` 在文件面板和 `show_file` 里都被禁止访问。
+
+**你在部署和使用时需要注意**
+
+- **一个部署只给你自己用**。不要把 MambaBot 的登录密钥给别人，也不要用你的订阅给别人提供服务、代跑或收费。Consumer Terms 禁止共享账号；Claude Code 的条款也不允许用 Pro / Max 的订阅凭据替别人转发请求。想给几个人用，就让每个人各自部署、各自登录自己的账号；要做成面向他人的服务，请改用 Claude Console 的 API Key，并遵守 Commercial Terms。
+- **订阅额度按普通的个人使用设计**。定时任务按需设置，不要让 Claude 24 小时满负荷空转。
+- **一个账号被封后，不要换另一个账号继续用**。使用政策明确禁止用其他账号绕过封禁。
+- **地区**：Anthropic 只在[支持的国家和地区](https://www.anthropic.com/supported-countries)提供服务。服务器放在支持的地区，并不等于你本人所在的地区也受支持，请自行确认。
+- **内容**：遵守 [Usage Policy](https://www.anthropic.com/legal/aup)，不要尝试越狱或绕过模型的安全限制。
+
+以上只是提醒，不构成法律意见，一切以 Anthropic 的最新条款为准：[Consumer Terms](https://www.anthropic.com/legal/consumer-terms)、[Usage Policy](https://www.anthropic.com/legal/aup)、[Claude Code Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)。
+
+---
+
 ## English
 
 **MambaBot** is an open-source, self-hosted, always-on AI agent: the same idea as Grok Bot, ChatGPT dots and Meta Muse,
@@ -174,6 +195,14 @@ Node.js process that starts `claude -p` (stream-json) for each reply. It include
 Quick start: `node src/server.js`, then log in with the secret in `~/.config/assistant-web/initial-login-secret`.
 For long-running and public deployments, see `scripts/serve.sh`, `deploy/site.env.example` and `deploy/nginx.example.conf`;
 for internals, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The UI is in Simplified Chinese.
+
+**Accounts and Anthropic's terms.** MambaBot runs the unmodified `claude` CLI and never reads, stores or relays your
+Claude credentials; sign in with `claude`'s own `/login` on the server. Use each deployment for yourself only: do not
+share the login secret or serve other people through your Pro/Max subscription. Anyone else should deploy their own copy
+with their own account, and products for other users should use a Console API key. Anthropic's
+[Consumer Terms](https://www.anthropic.com/legal/consumer-terms), [Usage Policy](https://www.anthropic.com/legal/aup),
+[supported regions](https://www.anthropic.com/supported-countries) and
+[Claude Code legal terms](https://code.claude.com/docs/en/legal-and-compliance) apply; violations can get your account suspended.
 
 ## License
 
