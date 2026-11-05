@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { claudeEnv } from './claude-accounts.js';
 
 // Account, plan usage and the slash-command list, all straight from the Claude CLI's own
 // control channel (`initialize` + `get_usage`). No model call is made, so this costs nothing
@@ -46,8 +47,9 @@ export function normalizeCommands(list) {
 }
 
 export class AccountService {
-  constructor({ cfg, log = console, spawnImpl = spawn, catalog = null }) {
-    Object.assign(this, { cfg, log, spawnImpl, catalog });
+  /** @param dir  the account's CLAUDE_CONFIG_DIR (claude-accounts.js); undefined = the server's own */
+  constructor({ cfg, log = console, spawnImpl = spawn, catalog = null, dir = undefined }) {
+    Object.assign(this, { cfg, log, spawnImpl, catalog, dir });
     this.data = null;
     this.probing = null;
     this.lastForced = 0;
@@ -73,7 +75,7 @@ export class AccountService {
         ...this.cfg.claudePrefixArgs,
         '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
         '--no-session-persistence', '--permission-mode', 'manual', '--permission-prompt-tool', 'stdio',
-      ], { cwd: this.cfg.claudeCwd, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'ignore'] });
+      ], { cwd: this.cfg.claudeCwd, env: claudeEnv(this.dir), stdio: ['pipe', 'pipe', 'ignore'] });
       const send = (id, subtype) => child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: id, request: { subtype } })}\n`);
       let init = null;
       let buf = '';

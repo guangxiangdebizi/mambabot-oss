@@ -108,6 +108,11 @@ function renderSettings() {
   const stamp = el('span', 'sheet-meta', data ? `更新于 ${when(data.fetchedAt)}` : '');
   const refresh = button(loading ? '读取中…' : '刷新', 'link-btn', () => loadAccount(true));
   refresh.disabled = loading;
+  // Own request and fixed slot, like the site links below: switching must work even when the
+  // current account's CLI cannot answer.
+  const claudeSlot = el('div');
+  body.append(claudeSlot);
+  renderClaudeAccounts(claudeSlot);
   const usage = section('用量', stamp, refresh);
   if (error) usage.append(el('p', 'sheet-error', `读取失败：${error}`));
   if (!data && !error) usage.append(el('p', 'sheet-muted', '正在读取…'));
@@ -424,6 +429,49 @@ export async function openShare(convId) {
   }
 }
 
+async function renderClaudeAccounts(container) {
+  let accounts;
+  try {
+    accounts = (await h.api('/api/claude-accounts')).accounts;
+  } catch {
+    return;
+  }
+  if (accounts.length < 2) return;
+  const sec = section('Claude 账号');
+  const group = el('div', 'perm-list');
+  group.setAttribute('role', 'radiogroup');
+  group.setAttribute('aria-label', 'Claude 账号');
+  for (const a of accounts) {
+    const opt = el('label', 'perm-opt');
+    const r = el('input');
+    r.type = 'radio';
+    r.name = 'claude-account';
+    r.value = a.id;
+    r.checked = a.active;
+    const text = el('span', 'perm-text');
+    text.append(el('span', 'perm-label', a.name), el('span', 'perm-desc', a.sharedHistory
+      ? a.id : `${a.id}：没有共享对话记录，切换到它后，之前的对话无法接着聊`));
+    opt.append(r, text);
+    r.addEventListener('change', async () => {
+      if (!r.checked) return;
+      group.querySelectorAll('input').forEach((x) => { x.disabled = true; });
+      try {
+        await h.api('/api/prefs', { method: 'PUT', body: { claudeAccount: a.id } });
+        h.toast(`已切换到“${a.name}”，从下一条回复开始生效`);
+        loadAccount(false);
+      } catch (err) {
+        if (err.status !== 401) h.toast(err.message);
+        group.querySelectorAll('input').forEach((x) => { x.disabled = false; });
+        const cur = accounts.find((x) => x.active);
+        if (cur) group.querySelector(`input[value="${CSS.escape(cur.id)}"]`).checked = true;
+      }
+    });
+    group.append(opt);
+  }
+  sec.append(group, el('p', 'sheet-muted', '都是你自己的 Claude 账号，各自用 claude 的 /login 登录。对所有对话和定时任务生效；正在进行的回复继续用原来的账号。下面的用量和账号信息显示的是当前账号。'));
+  container.append(sec);
+}
+
 async function renderAccountLinks(container) {
   let links;
   try {
@@ -432,7 +480,7 @@ async function renderAccountLinks(container) {
     return;
   }
   if (!links.length) return;
-  const sec = section('切换账号');
+  const sec = section('切换站点');
   const list = el('div', 'account-links');
   for (const link of links) {
     const current = new URL(link.url).host === location.host;
@@ -441,7 +489,7 @@ async function renderAccountLinks(container) {
     item.append(el('span', '', link.name), el('span', 'account-link-note', current ? '当前' : new URL(link.url).host));
     list.append(item);
   }
-  sec.append(list, el('p', 'sheet-muted', '每个账号是独立的站点，会话、记忆和定时任务互不相通；第一次进入需要单独登录。'));
+  sec.append(list, el('p', 'sheet-muted', '每个站点是独立的 MambaBot，会话、记忆和定时任务互不相通；第一次进入需要单独登录。'));
   container.append(sec);
 }
 

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
+import { claudeEnv } from './claude-accounts.js';
 
 // Context-window usage of one chat branch, from the CLI's own `get_context_usage` control
 // request (what the terminal's /context shows). The session is opened as a throwaway fork
@@ -27,6 +28,8 @@ export function normalizeContext(raw) {
 export class ContextProbe {
   constructor({ cfg, spawnImpl = spawn }) {
     Object.assign(this, { cfg, spawnImpl });
+    // Config directory of the Claude account to run as (see claude-accounts.js); set by the server.
+    this.claudeDir = () => undefined;
     this.cache = new Map();
     this.inflight = new Map();
   }
@@ -59,7 +62,7 @@ export class ContextProbe {
       }
       if (model) args.push('--model', model);
       const child = this.spawnImpl(this.cfg.claudeBin, args, {
-        cwd, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'ignore'],
+        cwd, env: claudeEnv(this.claudeDir()), stdio: ['pipe', 'pipe', 'ignore'],
       });
       let buf = '';
       let done = false;

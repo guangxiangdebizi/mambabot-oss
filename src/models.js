@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { readJson, writeJsonAtomic } from './fsutil.js';
+import { claudeEnv } from './claude-accounts.js';
 
 // The model list comes from the Claude CLI itself: its `initialize` control response lists
 // exactly the models this account and runtime accept, with their supported effort levels.
@@ -27,6 +28,8 @@ export function normalizeModels(list) {
 export class ModelCatalog {
   constructor({ cfg, log = console, spawnImpl = spawn }) {
     Object.assign(this, { cfg, log, spawnImpl });
+    // Config directory of the Claude account to run as (see claude-accounts.js); set by the server.
+    this.claudeDir = () => undefined;
     this.path = join(cfg.dataDir, 'models.json');
     this.models = [];
     this.fetchedAt = null;
@@ -83,7 +86,7 @@ export class ModelCatalog {
         ...this.cfg.claudePrefixArgs,
         '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
         '--no-session-persistence', '--permission-mode', 'manual', '--permission-prompt-tool', 'stdio',
-      ], { cwd: this.cfg.claudeCwd, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'ignore'] });
+      ], { cwd: this.cfg.claudeCwd, env: claudeEnv(this.claudeDir()), stdio: ['pipe', 'pipe', 'ignore'] });
       let buf = '';
       let done = false;
       const finish = (err) => {

@@ -29,6 +29,13 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   plan, version) and `get_usage` (5-hour / weekly limits, reset times, usage credits) control
   requests, in a short-lived process with `--no-session-persistence`. No model call, so it
   costs no quota; cached 60 s, manual refresh at most every 10 s.
+- **Claude accounts** (`AW_CLAUDE_ACCOUNTS`, `/api/claude-accounts`): several of the owner's
+  own Claude Code config directories, each signed in with `claude`'s own `/login`. The one
+  picked in Settings (`prefs.claudeAccount`) is passed as `CLAUDE_CONFIG_DIR` to every CLI child
+  (replies, tasks, probes); the default `~/.claude` runs with it unset, since setting it moves
+  `.claude.json`. Usage is cached per account. Chats resume sessions by id, so accounts are
+  expected to share `~/.claude/projects` (a symlink); one that does not is flagged in Settings.
+  MambaBot never reads or copies the credentials themselves.
 - **`/` commands**: typing `/` lists the CLI's slash commands (from `initialize`, via
   `/api/commands`). Session settings that would not outlive a one-reply process (`/model`,
   `/effort`, `/usage`, `/clear`, `/rename`) are handled by the page instead; terminal-only

@@ -88,6 +88,7 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 <img src="docs/screenshots/mobile-settings.png" alt="用量与设置" width="260" align="right">
 
 - 5 小时额度和每周额度的用量、重置时间直接读自 Claude Code（和终端 `/usage` 相同），读取时不调用模型。
+- **多个 Claude 账号**：同一台服务器上登录了你自己的几个 Claude 账号时，可以在这里切换，之后的回复和定时任务都用新账号，用量也显示新账号的。几个账号共用对话记录，切换后旧对话照常接着聊。
 - 权限模式、同时进行的回复数（1–6）、系统通知都在这里设置。
 - 可选的**实时浏览器面板**：服务器上运行一个真实的 [BrowserOS](https://browseros.com)，Claude 操作浏览器时你在网页右侧实时看着。遇到登录、扫码、验证码，Claude 会把控制权交给你，你操作完再交还给它。
 
@@ -134,12 +135,23 @@ node src/server.js                # 默认监听 127.0.0.1:3400
 |---|---|---|
 | `AW_PORT` / `AW_HOST` | `3400` / `127.0.0.1` | 监听地址，建议只监听本机，由 nginx 对外 |
 | `AW_ALLOWED_HOSTS` | — | 对外的域名（逗号分隔），用于 Host 校验 |
-| `AW_ACCOUNT_LINKS` | — | 你的其他 MambaBot 站点，显示在「设置 › 切换账号」里，格式 `名称\|https://域名`，逗号分隔（写进 site.env 时加引号） |
+| `AW_CLAUDE_ACCOUNTS` | — | 你自己在这台机器上的多个 Claude 账号，可在「用量与设置 › Claude 账号」里切换，格式 `名称\|配置目录`，逗号分隔，例如 `"主账号\|~/.claude,第二个\|~/.claude-2"`（见下文） |
+| `AW_ACCOUNT_LINKS` | — | 你的其他 MambaBot 站点，显示在「设置 › 切换站点」里，格式 `名称\|https://域名`，逗号分隔（写进 site.env 时加引号） |
 | `AW_TRUST_PROXY` / `AW_COOKIE_SECURE` | `0` | 放在 nginx 后面时都设成 `1` |
 | `AW_CLAUDE_CWD` | `~/assistant-home` | Claude 的工作目录，网页会话和你在终端里用的会话互不干扰 |
 | `AW_DATA_DIR` / `AW_CONFIG_DIR` | `~/.local/share/assistant-web` / `~/.config/assistant-web` | 对话数据 / 登录凭据 |
 | `AW_BROWSER_BIN` / `AW_BROWSER_PROFILE` | — | 开启实时浏览器面板，需要 BrowserOS、Xvfb、x11vnc、noVNC，以及 `sudo -n iptables`（把 BrowserOS 的端口限制在本机） |
 | `TZ` | `serve.sh` 中为 `UTC` | 定时任务按服务器本地时间计算 |
+
+**多个 Claude 账号**：每个账号用一个单独的 Claude Code 配置目录登录，再让它和默认账号共用对话记录（会话按 id 续接，记忆也在这里）和 skills：
+
+```sh
+CLAUDE_CONFIG_DIR=~/.claude-2 claude            # 在交互界面里 /login 登录第二个账号
+ln -s ~/.claude/projects ~/.claude-2/projects  # 若已存在，先把里面的内容移到 ~/.claude/projects
+ln -s ~/.claude/skills ~/.claude-2/skills
+```
+
+然后在 `site.env` 里写上 `AW_CLAUDE_ACCOUNTS="主账号|~/.claude,第二个|~/.claude-2"` 并重启服务。没有共用对话记录的账号会在设置里标出来。只放你本人的账号，见[账号与 Anthropic 条款](#账号与-anthropic-条款)。
 
 **写给 Claude 的本机说明**：在 `~/.config/assistant-web/handoff.md` 里写这台机器的情况，例如"这是一台 2 核服务器""可以用 `sudo -n`""SSH 别名 xxx 指向哪台机器"，
 每次回复都会附在 Claude 的系统提示后面。这个文件只放在你的服务器上，不进仓库。
@@ -166,13 +178,14 @@ MambaBot 只是官方 Claude Code 的一个网页前端，用的是你自己的�
 **MambaBot 自己的做法**
 
 - 只调用 Anthropic 发布的原版 `claude` CLI，不修改它，也不替换它的登录方式。
+- 「多个 Claude 账号」只是切换 `CLAUDE_CONFIG_DIR`，让 CLI 用另一个已经登录好的配置目录；每个账号都要你自己在服务器上用 `/login` 登录。
 - 不读取、不保存、不转发你的 Claude 登录凭据：登录完全由 `claude` 自己的 `/login` 流程完成；网页登录密钥只用来进 MambaBot，和 Claude 账号无关；`~/.claude/.credentials.json` 在文件面板和 `show_file` 里都被禁止访问。
 
 **你在部署和使用时需要注意**
 
 - **一个部署只给你自己用**。不要把 MambaBot 的登录密钥给别人，也不要用你的订阅给别人提供服务、代跑或收费。Consumer Terms 禁止共享账号；Claude Code 的条款也不允许用 Pro / Max 的订阅凭据替别人转发请求。想给几个人用，就让每个人各自部署、各自登录自己的账号；要做成面向他人的服务，请改用 Claude Console 的 API Key，并遵守 Commercial Terms。
 - **订阅额度按普通的个人使用设计**。定时任务按需设置，不要让 Claude 24 小时满负荷空转。
-- **一个账号被封后，不要换另一个账号继续用**。使用政策明确禁止用其他账号绕过封禁。
+- **一个账号被封后，不要换另一个账号继续用**。使用政策明确禁止用其他账号绕过封禁。「多个 Claude 账号」只用来放你本人的账号，不要放别人的。
 - **地区**：Anthropic 只在[支持的国家和地区](https://www.anthropic.com/supported-countries)提供服务。服务器放在支持的地区，并不等于你本人所在的地区也受支持，请自行确认。
 - **内容**：遵守 [Usage Policy](https://www.anthropic.com/legal/aup)，不要尝试越狱或绕过模型的安全限制。
 
@@ -191,6 +204,7 @@ Node.js process that starts `claude -p` (stream-json) for each reply. It include
 - a terminal panel: run your own commands in the project directory, and see every command Claude ran in the chat with its output
 - projects: chats grouped by a server directory that is their working directory (shared files, `CLAUDE.md` and memory), with a read-only file panel (Markdown rendered, code with line numbers, images, downloads; clickable paths in replies)
 - `/compact`, `/status` (context window and spend), scheduled tasks via cron, plan usage, and an optional live BrowserOS panel with human hand-off for logins and captchas
+- switching between several of your own Claude accounts on the host (`AW_CLAUDE_ACCOUNTS`, one Claude Code config directory each, sharing `~/.claude/projects`)
 
 Quick start: `node src/server.js`, then log in with the secret in `~/.config/assistant-web/initial-login-secret`.
 For long-running and public deployments, see `scripts/serve.sh`, `deploy/site.env.example` and `deploy/nginx.example.conf`;

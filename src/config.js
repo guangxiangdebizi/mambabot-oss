@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { parseClaudeAccounts } from './claude-accounts.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -43,6 +44,8 @@ export function loadConfig(overrides = {}) {
     claudeProjectsDir: env.AW_CLAUDE_PROJECTS_DIR || join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'projects'),
     maxRuns: Number(env.AW_MAX_RUNS || 2),
     accountLinks: parseAccountLinks(env.AW_ACCOUNT_LINKS),
+    // The owner's Claude accounts on this host, switchable in Settings; empty = the CLI's own.
+    claudeAccounts: parseClaudeAccounts(env.AW_CLAUDE_ACCOUNTS, home),
     allowedHosts: ['localhost', '127.0.0.1', '[::1]', ...list(env.AW_ALLOWED_HOSTS)],
     trustProxy: env.AW_TRUST_PROXY === '1',
     cookieSecure: env.AW_COOKIE_SECURE === '1',

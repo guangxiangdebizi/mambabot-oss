@@ -1,4 +1,5 @@
 // Stand-in for `claude -p --input-format stream-json --output-format stream-json`.
+import { basename } from 'node:path';
 // Behaviour is chosen by the user prompt: slow | steps | background | tool | crash | args | echo | (default).
 // A user message that arrives mid-turn is queued and taken in at the next step, as the CLI does.
 import { randomUUID } from 'node:crypto';
@@ -154,6 +155,12 @@ async function onUser(content) {
     result(s);
     return;
   }
+  if (text.includes('whoami?')) {
+    const s = `config=${process.env.CLAUDE_CONFIG_DIR || '-'}`;
+    streamText('msg_w', [s]);
+    result(s);
+    return;
+  }
   if (text.includes('cwd?')) {
     const s = `cwd=${process.cwd()}`;
     streamText('msg_c', [s]);
@@ -182,7 +189,7 @@ process.stdin.on('data', (chunk) => {
     if (m.type === 'control_request' && m.request.subtype === 'initialize') {
       out({ type: 'control_response', response: { subtype: 'success', request_id: m.request_id, response: {
         models: MODELS,
-        account: { email: 'owner@example.test', organization: 'Test Org', subscriptionType: 'Claude Pro', apiProvider: 'firstParty' },
+        account: { email: process.env.CLAUDE_CONFIG_DIR ? `${basename(process.env.CLAUDE_CONFIG_DIR)}@example.test` : 'owner@example.test', organization: 'Test Org', subscriptionType: 'Claude Pro', apiProvider: 'firstParty' },
         claude_code_version: '9.9.9',
         commands: [
           { name: 'compact', description: 'Free up context', argumentHint: '<instructions>' },

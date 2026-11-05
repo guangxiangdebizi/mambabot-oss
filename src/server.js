@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
@@ -15,6 +16,7 @@ import { readJson, writeJsonAtomic } from './fsutil.js';
 import { BrowserManager, RfbFilter } from './browser.js';
 import { acceptUpgrade, bridge, rejectUpgrade } from './ws.js';
 import { AccountService } from './account.js';
+import { sharesProjects } from './claude-accounts.js';
 import { ContextProbe, sessionCost } from './context.js';
 import { MEDIA_SERVER, MediaMcp } from './media.js';
 import { TASK_SERVER, TaskMcp, TaskScheduler, describeCron, nextRun, parseCron } from './schedule.js';
@@ -137,8 +139,22 @@ export async function createApp(cfg = loadConfig(), log = console) {
   runs.handoffExtra = (await readFile(join(cfg.configDir, 'handoff.md'), 'utf8').catch(() => '')).trim();
   const browser = cfg.browserEnabled ? new BrowserManager({ cfg, log }) : null;
   await browser?.init();
-  const account = new AccountService({ cfg, log, catalog });
+  // The owner's Claude accounts (AW_CLAUDE_ACCOUNTS): every CLI child runs as the one picked in
+  // Settings. Usage is per account, so each keeps its own cached probe.
+  const claudeAccounts = cfg.claudeAccounts || [];
+  for (const a of claudeAccounts) a.sharedHistory = await sharesProjects(a, homedir(), cfg.claudeProjectsDir);
+  for (const a of claudeAccounts.filter((x) => !x.sharedHistory)) {
+    log.warn(`Claude 账号「${a.name}」没有和默认账号共享 projects 目录，切换到它后旧对话无法续接`);
+  }
+  const activeAccount = () => claudeAccounts.find((a) => a.id === prefs.claudeAccount) || claudeAccounts[0] || null;
+  const claudeDir = () => { const a = activeAccount(); return a ? a.dir : undefined; };
+  const accountServices = new Map(claudeAccounts.map((a) => [a.id, new AccountService({ cfg, log, catalog, dir: a.dir })]));
+  const fallbackAccount = new AccountService({ cfg, log, catalog });
+  const accountService = () => accountServices.get(activeAccount()?.id) || fallbackAccount;
+  runs.claudeDir = claudeDir;
+  catalog.claudeDir = claudeDir;
   const contextProbe = new ContextProbe({ cfg });
+  contextProbe.claudeDir = claudeDir;
   const scheduler = new TaskScheduler({ cfg, log });
   // A task without a model follows the owner's default, so effort is checked against that.
   scheduler.validateModel = (model, effort) => catalog.validate(model || prefs.model || 'default', effort);
@@ -852,20 +868,33 @@ export async function createApp(cfg = loadConfig(), log = console) {
         next.permissionMode = body.permissionMode;
         log.info(`权限模式改为 ${next.permissionMode}`);
       }
+      if (body.claudeAccount !== undefined) {
+        const target = claudeAccounts.find((a) => a.id === body.claudeAccount);
+        if (!target) throw new HttpError(400, '没有这个 Claude 账号');
+        next.claudeAccount = target.id;
+        log.info(`Claude 账号切换为「${target.name}」`);
+      }
       prefs = next;
       await writeJsonAtomic(prefsPath, prefs);
       return sendJson(res, 200, { prefs });
     }
     if (path === '/api/account-links' && method === 'GET') return sendJson(res, 200, { links: cfg.accountLinks || [] });
+    if (path === '/api/claude-accounts' && method === 'GET') {
+      const active = activeAccount();
+      return sendJson(res, 200, {
+        accounts: claudeAccounts.map((a) => ({ id: a.id, name: a.name, active: a === active, sharedHistory: a.sharedHistory })),
+      });
+    }
     if (path === '/api/account' && method === 'GET') {
       try {
-        const { account: acct, version, usage, fetchedAt } = await account.get({ force: url.searchParams.get('refresh') === '1' });
-        return sendJson(res, 200, { account: acct, version, usage, fetchedAt });
+        const { account: acct, version, usage, fetchedAt } = await accountService().get({ force: url.searchParams.get('refresh') === '1' });
+        return sendJson(res, 200, { account: acct, version, usage, fetchedAt, claudeAccount: activeAccount()?.id || null });
       } catch (err) {
         throw new HttpError(502, `读取账号信息失败：${err.message}`);
       }
     }
     if (path === '/api/commands' && method === 'GET') {
+      const account = accountService();
       if (!account.data) {
         try { await account.get(); } catch (err) { throw new HttpError(502, `读取指令列表失败：${err.message}`); }
       }
@@ -1062,7 +1091,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
   return Object.assign(app, {
     server,
     secretPath,
-    account,
+    accountService,
     scheduler,
     taskMcp,
     mediaMcp,

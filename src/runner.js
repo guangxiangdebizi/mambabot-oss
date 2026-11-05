@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { claudeEnv } from './claude-accounts.js';
 import { StreamTranslator, approvalDetail, summarizeTool } from './stream.js';
 
 const RECENT_KEEP_MS = 2 * 60 * 1000;
@@ -42,6 +43,8 @@ const MODE_NOTE = {
 export class RunManager {
   constructor({ cfg, store, log = console, spawnImpl = spawn, catalog = null }) {
     Object.assign(this, { cfg, store, log, spawnImpl, catalog });
+    // Config directory of the Claude account to run as (see claude-accounts.js); set by the server.
+    this.claudeDir = () => undefined;
     this.onRunEnd = null;
     this.handoffExtra = '';
     this.active = new Map();
@@ -111,7 +114,7 @@ export class RunManager {
 
     const child = this.spawnImpl(this.cfg.claudeBin, args, {
       cwd,
-      env: { ...process.env, NO_COLOR: '1' },
+      env: claudeEnv(this.claudeDir()),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     run.child = child;
