@@ -12,8 +12,11 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
 - **Branches**: conversations are message trees. Editing a message or regenerating a reply
   starts Claude with `--resume <session> --resume-session-at <uuid> --fork-session`, so the
   new branch has exactly the earlier context; old branches stay switchable (`‹ 1/2 ›`).
-- **Attachments**: `POST /api/uploads` streams files (≤20 MB) to `<claude cwd>/uploads/`;
+- **Attachments**: `POST /api/uploads` streams files (≤50 MB) to `<claude cwd>/uploads/`;
   images go to Claude as image blocks, other files are named for the Read tool.
+  `GET /api/uploads/<id>` streams the file with byte ranges; it is inline only for types that
+  cannot script (raster images, audio, video; SVG under a sandbox CSP), whatever type the
+  uploading browser declared. `…/<id>/preview` and `…/<id>/part` feed the reader.
 - **Browser** (optional, `AW_BROWSER_BIN`): one BrowserOS (profile `AW_BROWSER_PROFILE`) on a
   private Xvfb display `:99`, started on the
   first real browser tool call or from the panel, kept across server restarts, stopped after
@@ -67,8 +70,54 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   outside the root (no symlink escapes); `.git`, `.ssh`, `.env*`, private keys and the like
   are neither listed nor served. `file` returns up to 512 KB of text (Markdown or plain,
   NUL-sniffed for binaries), `raw` serves images inline (SVG under a sandbox CSP) and
-  everything else as a download. The panel reloads after a reply's file-changing tool calls
-  and at the end of a run, and inline code in replies that looks like a path opens it.
+  everything else as a download (now via the reader, below). The panel reloads after a reply's
+  file-changing tool calls and at the end of a run.
+- **Reader** (`src/preview.js`, `src/office.js`, `src/zip.js`, `src/xml.js`, `public/reader.js`,
+  `public/pdfview.js`): one viewer for three sources, each with the same three endpoints:
+  project files (`/api/projects/<id|default>/{file,raw,part}?path=`), any host path a reply names
+  (`/api/files/{file,raw,part}?path=&conv=`, relative to the chat's `cwd`), and attachments
+  (`/api/uploads/<id>[/preview|/part]`). `file`/`preview` return the kind and content as plain
+  JSON: text (512 KB, UTF-8 / UTF-16 BOM / GB18030 detected), CSV/TSV tables (1000 rows), Jupyter
+  cells (PNG/JPEG outputs as `data:` URLs), and Office Open XML converted on the server without
+  dependencies: a ZIP central-directory reader with capped `inflateRawSync`, a DTD-less XML
+  reader (no entity expansion), then docx → paragraph/run/table blocks (styles for headings,
+  numbering.xml for list labels, gridSpan/vMerge), xlsx → one sheet at a time (`sheet=`, 1000 ×
+  60 cells, shared strings, number/date formats, merges), pptx → slides (title, text levels,
+  pictures, tables, notes). Converted results are cached (16, keyed by path, size and mtime).
+  Embedded images stay in the archive and are served one by one by `part?entry=` (raster types
+  only). The page renders everything with DOM text nodes; links are http(s)/mailto only. PDFs
+  use the vendored pdf.js legacy build (`public/vendor/pdfjs/<version>/`, Apache-2.0, loaded on
+  first use, CJK cmaps and standard fonts included) fetching `raw` with range requests; pages
+  render near the viewport and are released when far (canvas memory on phones). `raw` serves
+  media with ranges (video seeking on iOS needs 206s); `raw?render=html` serves an HTML file for
+  the reader's `<iframe sandbox="allow-same-origin">` with `CSP: sandbox allow-same-origin;
+  default-src 'none'` and `X-Frame-Options: SAMEORIGIN`: no script, no network. Host paths go
+  through `src/hostfiles.js`: real path, then refused if any part is a secret file or hidden
+  folder (as in projects) or it lies under the config or data dir, `~/.ssh`, `~/.claude`, the
+  Claude account dirs, browser profiles, `~/.config/gh`, `/proc`, `/sys`, `/dev`, `/run`, `/root`.
+- **Images in replies** (`public/markdown.js`, `replyMarkdownOptions` in `public/app.js`):
+  `![alt](src "title")` renders inline (a paragraph of only images becomes a figure row with
+  captions; every image opens the swipeable viewer). `src` resolves to the reply's saved copy
+  (`msg.media[src]`), a `data:image/…;base64` URL, the web proxy for http(s), or
+  `/api/files/raw?path=&conv=` for host paths. When a reply ends, `runs.beforeSave` copies every
+  host image its text references (≤ 30, ≤ 50 MB, credential rules above) into the upload store
+  as `msg.media` and sends it as a `meta` event, so the reply survives the file's deletion.
+  `[label](path)` and inline code that looks like a path open the reader. Image nodes are
+  reused across streaming re-renders so they do not reload. Markdown files in the reader
+  resolve relative images against their own folder. Shares stay text-only (images become
+  `[图片：…]`).
+- **Web images** (`src/remote.js`, `GET /api/media/remote?url=`): fetched by the server, never
+  by the page (CSP stays `img-src 'self'`). Only http(s) without credentials; DNS is resolved
+  first and every address must be public (`net.BlockList` of loopback, private, CGNAT,
+  link-local incl. 169.254.169.254, multicast, documentation, mapped/NAT64 forms), then the
+  socket connects to that checked address (no rebinding); ≤ 4 redirects, each checked again;
+  ≤ 15 MB, 15 s; the body must sniff (or be declared) as an image. Cached on disk
+  (`<data>/remote-images`, LRU, 300 MB / 3000 files). `AW_REMOTE_IMAGES_FAKE_IP=1` also allows
+  198.18.0.0/15 for hosts behind a fake-ip DNS proxy. 用量与设置 → 外链图片 (`prefs.remoteImages`,
+  `auto` or `click`) decides whether the page loads them right away or after a tap.
+- **Static files**: ETag (size + mtime) with 304s, gzip for text (cached per version),
+  `Cache-Control: immutable` under `vendor/`. The pdf.js worker alone gets
+  `script-src 'self' 'wasm-unsafe-eval'` for its image decoders; the page's CSP is unchanged.
 - **Terminal panel** (`src/terminal.js`, `public/terminal.js`): the owner's command line per
   root (a project or `default`), `POST /api/terminal/<root>/{run,input,stop,clear}` and
   `GET /api/terminal/<root>[/events]` (SSE: a snapshot, then `start` / `out` / `end`). One
@@ -83,11 +132,10 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   data.
 - **Showing files** (`src/media.js`): every run gets an `assistant-media` MCP server
   (`/internal/mcp/media`, loopback only, per-run token, pre-approved) with one tool,
-  `show_file(path, caption?)`. The file (≤ 20 MB, ≤ 20 per reply) is copied into the upload
-  store and added to the reply as a `file` part: png/jpg/gif/webp inline with a full-screen
-  viewer (tap to close, "原图" opens it), anything else (svg included) as a download card.
-  Paths under the config dir, `~/.ssh` and the CLI's credentials file are refused. Shares stay
-  text-only.
+  `show_file(path, caption?)`, now meant for delivering files (illustrations use Markdown
+  images, above). The file (≤ 50 MB, ≤ 20 per reply) is copied into the upload store and added
+  to the reply as a `file` part: png/jpg/gif/webp inline with the viewer, anything else as a
+  card that opens the reader. Paths follow the host-file rules above. Shares stay text-only.
 - **Reminders**: while the page is in the background, a finished/failed reply or a pending
   approval marks the tab title with ●; 用量与设置 → 提醒 also turns on system notifications
   (per device, needs browser permission).
@@ -140,7 +188,16 @@ Web sessions run from their own directory (`AW_CLAUDE_CWD`, default `~/assistant
   `Host` (blocks DNS rebinding). Failed logins are limited per client (real IP from nginx)
   and globally, and at most two password checks (scrypt) run at once.
 - Model output is rendered by building DOM nodes from text, never as HTML; links are
-  limited to http, https and mailto; a strict CSP blocks inline script.
+  limited to http, https and mailto; a strict CSP blocks inline script. Documents in the reader
+  follow the same rule (Office files are converted to plain data on the server); HTML files are
+  only shown in a script-less, network-less sandboxed frame.
+- Reading files: the web login can already run commands (terminal panel), so the reader adds no
+  power, but credential locations are refused everywhere (tree, reader, reply images,
+  `show_file`) so they never end up on a page by accident or by a model-chosen path.
+- Web images are fetched by the server from public addresses only (see above), so a reply
+  cannot make the server reach localhost, the LAN or the cloud metadata service. A
+  prompt-injected reply could still put data into an image URL; 外链图片 → 点击后显示 makes
+  that need a tap.
 - Tool permissions follow the owner's permission mode (see above). In every mode that still
   prompts, the prompt becomes an approval card with the full command or content; this server
   never approves a prompt by itself.

@@ -1,8 +1,8 @@
 import http from 'node:http';
-import { createReadStream } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { extname, join, normalize } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import {
@@ -11,7 +11,7 @@ import {
 import { ConversationStore, ID_RE, pathTo, resumePlan } from './store.js';
 import { PERMISSION_MODES, RunManager } from './runner.js';
 import { ModelCatalog } from './models.js';
-import { MAX_ATTACHMENTS, UploadStore } from './uploads.js';
+import { MAX_ATTACHMENTS, MAX_UPLOAD, UploadStore } from './uploads.js';
 import { readJson, writeJsonAtomic } from './fsutil.js';
 import { BrowserManager, RfbFilter } from './browser.js';
 import { acceptUpgrade, bridge, rejectUpgrade } from './ws.js';
@@ -23,6 +23,10 @@ import { TASK_SERVER, TaskMcp, TaskScheduler, describeCron, nextRun, parseCron }
 import { ShareStore, TOKEN_RE } from './shares.js';
 import { DEFAULT_ROOT, FileError, ProjectStore } from './projects.js';
 import { TerminalManager } from './terminal.js';
+import { FileAccessError, HostFiles } from './hostfiles.js';
+import { IMAGE_TYPES, PreviewError, buildPreview, previewPart, sendFile, typeOf } from './preview.js';
+import { RemoteError, RemoteImages } from './remote.js';
+import { imageRefs } from '../public/markdown.js';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 const COOKIE = 'aw_session';
@@ -46,10 +50,21 @@ const NOVNC_DIR = '/usr/share/novnc/';
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.webmanifest': 'application/manifest+json',
+  // pdf.js data files (public/vendor/pdfjs)
+  '.bcmap': 'application/octet-stream',
+  '.pfb': 'application/octet-stream',
+  '.ttf': 'font/ttf',
+  '.wasm': 'application/wasm',
+  '.icc': 'application/vnd.iccprofile',
 };
+const COMPRESSIBLE = new Set(['.html', '.js', '.mjs', '.css', '.svg', '.webmanifest', '.pfb', '.ttf']);
+// Reply images copied into the upload store when a reply ends (so they outlive the file).
+const MAX_SNAPSHOTS = 30;
+const REMOTE_IMAGE_MODES = ['auto', 'click'];
 const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   'X-Content-Type-Options': 'nosniff',
@@ -58,6 +73,10 @@ const SECURITY_HEADERS = {
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Resource-Policy': 'same-origin',
 };
+
+/** Errors from the file, preview and remote modules carry their own HTTP status. */
+const statusOf = (err) => (err instanceof HttpError || err instanceof FileError || err instanceof FileAccessError
+  || err instanceof PreviewError || err instanceof RemoteError ? err.status : 500);
 
 class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -133,7 +152,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
   const uploads = new UploadStore(cfg);
   await uploads.load();
   const prefsPath = join(cfg.dataDir, 'prefs.json');
-  let prefs = { model: 'default', effort: null, permissionMode: 'auto', maxRuns: cfg.maxRuns, ...(await readJson(prefsPath, {})) };
+  let prefs = { model: 'default', effort: null, permissionMode: 'auto', maxRuns: cfg.maxRuns, remoteImages: 'auto', ...(await readJson(prefsPath, {})) };
   const maxRuns = () => prefs.maxRuns || cfg.maxRuns;
   const runs = new RunManager({ cfg, store, log, catalog });
   runs.handoffExtra = (await readFile(join(cfg.configDir, 'handoff.md'), 'utf8').catch(() => '')).trim();
@@ -166,7 +185,11 @@ export async function createApp(cfg = loadConfig(), log = console) {
       models: catalog.models.map((m) => ({ value: m.value, name: m.displayName, efforts: m.efforts })),
     }),
   });
-  const mediaMcp = new MediaMcp({ cfg, uploads, show: async (runId, file) => runs.addFile(runId, file), cwdOf: (runId) => runs.cwdOf(runId) });
+  const hostFiles = new HostFiles(cfg);
+  const remoteImages = new RemoteImages({ dataDir: cfg.dataDir, log, fakeIp: cfg.remoteFakeIp });
+  const mediaMcp = new MediaMcp({
+    cfg, uploads, hostFiles, show: async (runId, file) => runs.addFile(runId, file), cwdOf: (runId) => runs.cwdOf(runId),
+  });
   const projects = new ProjectStore(cfg);
   await projects.load();
   // A chat keeps the directory it was created in (Claude sessions are stored per directory).
@@ -176,6 +199,30 @@ export async function createApp(cfg = loadConfig(), log = console) {
   await shares.load();
   const runMcpDir = join(cfg.dataDir, 'run-mcp');
   await mkdir(runMcpDir, { recursive: true, mode: 0o700 });
+  /**
+   * Images a reply shows with Markdown (`![](path)`) are copied into the upload store when it
+   * ends, so the reply keeps showing them after the file moves or /tmp is cleaned. Web images
+   * are not copied: they are fetched through the proxy only when the page shows them.
+   */
+  runs.beforeSave = async (run) => {
+    const refs = new Set();
+    for (const p of run.msg.parts) if (p.type === 'text' && p.text) for (const src of imageRefs(p.text)) refs.add(src);
+    const media = { ...(run.msg.media || {}) };
+    let added = 0;
+    for (const ref of refs) {
+      if (Object.keys(media).length >= MAX_SNAPSHOTS) break;
+      if (media[ref] || /^(https?:|data:)/i.test(ref)) continue;
+      try {
+        const { real, size } = await hostFiles.file(ref, run.cwd);
+        if (!IMAGE_TYPES[extname(real).toLowerCase()] || !size || size > MAX_UPLOAD) continue;
+        media[ref] = uploads.publicView(await uploads.importFile(real));
+        added += 1;
+      } catch { /* missing or refused: the page shows why */ }
+    }
+    if (!added) return;
+    run.msg.media = media;
+    runs.emit(run, { type: 'meta', media });
+  };
   runs.onRunEnd = async (run) => {
     taskMcp.runEnded(run.id);
     mediaMcp.runEnded(run.id);
@@ -625,7 +672,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       }
       throw new HttpError(405, '不支持的请求方法');
     }
-    const pm = path.match(/^\/api\/projects\/([^/]+)(?:\/(tree|file|raw))?$/);
+    const pm = path.match(/^\/api\/projects\/([^/]+)(?:\/(tree|file|raw|part))?$/);
     if (!pm || !(ID_RE.test(pm[1]) || (pm[1] === DEFAULT_ROOT && pm[2]))) throw new HttpError(404, '接口不存在');
     const [, key, action] = pm;
     if (!action && method === 'PATCH') {
@@ -646,19 +693,10 @@ export async function createApp(cfg = loadConfig(), log = console) {
     const rel = url.searchParams.get('path') || '';
     return wrap(async () => {
       if (action === 'tree') return sendJson(res, 200, { root: projects.rootDir(key), ...(await projects.listDir(key, rel)) });
-      if (action === 'file') return sendJson(res, 200, { file: await projects.preview(key, rel) });
+      if (action === 'file') return sendJson(res, 200, { file: await projects.preview(key, rel, { sheet: Number(url.searchParams.get('sheet')) || 0 }) });
+      if (action === 'part') return sendPart(res, await projects.part(key, rel, url.searchParams.get('entry') || ''));
       const file = await projects.raw(key, rel);
-      const inline = file.type && url.searchParams.get('download') !== '1';
-      res.writeHead(200, {
-        'Content-Type': inline ? file.type : 'application/octet-stream',
-        'Content-Length': file.size,
-        'Cache-Control': 'no-cache',
-        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
-        // An SVG opened on its own must not run scripts in this origin.
-        ...(file.type === 'image/svg+xml' ? { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox" } : {}),
-      });
-      createReadStream(file.path).on('error', () => res.destroy()).pipe(res);
-      return undefined;
+      return sendFile(req, res, { ...file, download: url.searchParams.get('download') === '1', html: url.searchParams.get('render') === 'html' });
     });
   }
 
@@ -778,25 +816,61 @@ export async function createApp(cfg = loadConfig(), log = console) {
     let name = '';
     try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch { /* keep empty */ }
     const declared = Number(req.headers['content-length']);
-    if (Number.isFinite(declared) && declared > 20 * 1024 * 1024) throw new HttpError(413, '文件超过 20 MB 上限');
+    if (Number.isFinite(declared) && declared > MAX_UPLOAD) throw new HttpError(413, `文件超过 ${MAX_UPLOAD / 1024 / 1024} MB 上限`);
     const result = await uploads.save(req, { name, type: req.headers['content-type'] });
     if (result.error) throw new HttpError(400, result.error);
     return sendJson(res, 201, { attachment: uploads.publicView(result.item) });
   }
 
-  async function serveUpload(res, id) {
+  /** An attachment (or a file Claude showed): the bytes, reader data, or an embedded image. */
+  async function serveUpload(req, res, id, action, url) {
     const u = uploads.get(id);
     if (!u) throw new HttpError(404, '附件不存在');
-    let data;
-    try { data = await readFile(u.path); } catch { throw new HttpError(404, '附件已丢失'); }
-    const inlineOk = /^image\/(png|jpeg|gif|webp)$/.test(u.type);
-    res.writeHead(200, {
-      'Content-Type': inlineOk ? u.type : 'application/octet-stream',
-      'Content-Length': data.length,
-      'Cache-Control': 'private, max-age=86400',
-      'Content-Disposition': `${inlineOk ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(u.name)}`,
+    const st = await stat(u.path).catch(() => null);
+    if (!st?.isFile()) throw new HttpError(404, '附件已丢失');
+    if (action === 'preview') {
+      const file = await buildPreview(u.path, { display: u.name, name: u.name, sheet: Number(url.searchParams.get('sheet')) || 0 });
+      return sendJson(res, 200, { file });
+    }
+    if (action === 'part') return sendPart(res, await previewPart(u.path, url.searchParams.get('entry') || ''));
+    // The stored type came from the uploading browser; inline only for types that cannot script.
+    const type = typeOf(u.name) || (/^(image|audio|video)\//.test(u.type) ? u.type : null);
+    return sendFile(req, res, {
+      path: u.path, name: u.name, size: st.size, type, download: url.searchParams.get('download') === '1', cache: 'private, max-age=86400',
+      html: url.searchParams.get('render') === 'html',
     });
+  }
+
+  function sendPart(res, { data, type }) {
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': data.length, 'Cache-Control': 'private, max-age=3600' });
     return res.end(data);
+  }
+
+  /**
+   * Any file a reply names, outside a project too: `path` absolute, `~/…` or relative to the
+   * chat's directory (`conv`). Credential locations are refused (hostfiles.js).
+   */
+  async function hostFilesApi(req, res, url, action) {
+    const convId = url.searchParams.get('conv');
+    const conv = convId && ID_RE.test(convId) ? store.get(convId) : null;
+    const base = conv ? cwdOf(conv) : cfg.claudeCwd;
+    const raw = url.searchParams.get('path') || '';
+    if (action === 'file') {
+      const real = await hostFiles.locate(raw, base);
+      const file = await buildPreview(real, { display: real, sheet: Number(url.searchParams.get('sheet')) || 0 });
+      return sendJson(res, 200, { file: { ...file, absolute: true } });
+    }
+    const { real, size } = await hostFiles.file(raw, base);
+    if (action === 'part') return sendPart(res, await previewPart(real, url.searchParams.get('entry') || ''));
+    const name = real.split('/').pop();
+    return sendFile(req, res, {
+      path: real, name, size, type: typeOf(name), download: url.searchParams.get('download') === '1', html: url.searchParams.get('render') === 'html',
+    });
+  }
+
+  async function remoteImage(req, res, url) {
+    const img = await remoteImages.get(url.searchParams.get('url'));
+    return sendFile(req, res, { path: img.path, name: 'image', size: img.size, type: img.type, cache: 'private, max-age=86400' });
   }
 
   async function api(req, res, url) {
@@ -868,6 +942,10 @@ export async function createApp(cfg = loadConfig(), log = console) {
         next.permissionMode = body.permissionMode;
         log.info(`权限模式改为 ${next.permissionMode}`);
       }
+      if (body.remoteImages !== undefined) {
+        if (!REMOTE_IMAGE_MODES.includes(body.remoteImages)) throw new HttpError(400, '不支持的外链图片设置');
+        next.remoteImages = body.remoteImages;
+      }
       if (body.claudeAccount !== undefined) {
         const target = claudeAccounts.find((a) => a.id === body.claudeAccount);
         if (!target) throw new HttpError(400, '没有这个 Claude 账号');
@@ -908,8 +986,11 @@ export async function createApp(cfg = loadConfig(), log = console) {
     if (path.startsWith('/api/terminal/')) return terminalApi(req, res, path, method);
     if (path.startsWith('/api/browser')) return browserApi(req, res, path, method);
     if (path === '/api/uploads' && method === 'POST') return upload(req, res);
-    const um = path.match(/^\/api\/uploads\/([^/]+)$/);
-    if (um && method === 'GET' && ID_RE.test(um[1])) return serveUpload(res, um[1]);
+    const um = path.match(/^\/api\/uploads\/([^/]+)(?:\/(preview|part))?$/);
+    if (um && (method === 'GET' || method === 'HEAD') && ID_RE.test(um[1])) return serveUpload(req, res, um[1], um[2], url);
+    const fm = path.match(/^\/api\/files\/(file|raw|part)$/);
+    if (fm && (method === 'GET' || method === 'HEAD')) return hostFilesApi(req, res, url, fm[1]);
+    if (path === '/api/media/remote' && (method === 'GET' || method === 'HEAD')) return remoteImage(req, res, url);
 
     if (path === '/api/shares' && method === 'GET') return sendJson(res, 200, { shares: shares.list() });
     const sm = path.match(/^\/api\/shares\/([^/]+)$/);
@@ -969,6 +1050,9 @@ export async function createApp(cfg = loadConfig(), log = console) {
     throw new HttpError(405, '不支持的请求方法');
   }
 
+  // Static files are revalidated (ETag) instead of re-sent, and text is gzipped once per version:
+  // the page is used from phones far from the server.
+  const gzipCache = new Map();
   async function serveStatic(req, res, path) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: '不支持的请求方法' });
     let rel;
@@ -978,15 +1062,47 @@ export async function createApp(cfg = loadConfig(), log = console) {
       return sendJson(res, 404, { error: '未找到' });
     }
     const file = join(PUBLIC_DIR, rel);
-    const type = MIME[extname(file)];
+    const ext = extname(file);
+    const type = MIME[ext];
     if (!file.startsWith(PUBLIC_DIR) || !type || rel.includes('..')) return sendJson(res, 404, { error: '未找到' });
+    let st;
     try {
-      const data = await readFile(file);
-      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Content-Length': data.length });
-      return res.end(req.method === 'HEAD' ? undefined : data);
+      st = await stat(file);
+      if (!st.isFile()) throw new Error('not a file');
     } catch {
       return sendJson(res, 404, { error: '未找到' });
     }
+    const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
+    // Vendored libraries live under a versioned path and never change in place.
+    const headers = {
+      'Content-Type': type, ETag: etag, Vary: 'Accept-Encoding',
+      'Cache-Control': rel.startsWith('vendor/') ? 'public, max-age=31536000, immutable' : 'no-cache',
+    };
+    // pdf.js decodes some image formats with WebAssembly inside its worker; the page itself keeps the strict CSP.
+    if (rel.startsWith('vendor/pdfjs/') && (ext === '.mjs' || ext === '.js')) {
+      headers['Content-Security-Policy'] = SECURITY_HEADERS['Content-Security-Policy'].replace("script-src 'self'", "script-src 'self' 'wasm-unsafe-eval'");
+    }
+    const tags = String(req.headers['if-none-match'] || '').split(',').map((t) => t.trim().replace(/^W\//, ''));
+    if (tags.includes(etag)) {
+      res.writeHead(304, headers);
+      return res.end();
+    }
+    let data;
+    try { data = await readFile(file); } catch { return sendJson(res, 404, { error: '未找到' }); }
+    if (COMPRESSIBLE.has(ext) && data.length > 1024 && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+      const key = `${file}|${etag}`;
+      let gz = gzipCache.get(key);
+      if (!gz) {
+        gz = gzipSync(data, { level: 6 });
+        gzipCache.set(key, gz);
+        if (gzipCache.size > 200) gzipCache.delete(gzipCache.keys().next().value);
+      }
+      data = gz;
+      headers['Content-Encoding'] = 'gzip';
+    }
+    headers['Content-Length'] = data.length;
+    res.writeHead(200, headers);
+    return res.end(req.method === 'HEAD' ? undefined : data);
   }
 
   /** noVNC's ES modules, read-only from the system package (core/ and vendor/ only). */
@@ -1052,7 +1168,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       return serveStatic(req, res, url.pathname);
     };
     handle().catch((err) => {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = statusOf(err);
       if (status === 500) log.error('请求处理失败', req.method, url?.pathname, err);
       if (res.headersSent) return res.end();
       return sendJson(res, status, { error: status === 500 ? '服务器内部错误' : err.message, ...(err.extra || {}) });
@@ -1097,6 +1213,8 @@ export async function createApp(cfg = loadConfig(), log = console) {
     mediaMcp,
     catalog,
     uploads,
+    remoteImages,
+    hostFiles,
     browser,
     runs,
     store,

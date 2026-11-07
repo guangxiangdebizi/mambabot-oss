@@ -142,7 +142,7 @@ function renderSettings() {
   }
   body.append(usage);
 
-  body.append(permissionSection(), runSection(), notifySection());
+  body.append(permissionSection(), remoteImagesSection(), runSection(), notifySection());
 
   // Own request and fixed slot: switching must still work when this account's CLI cannot answer.
   const switchSlot = el('div');
@@ -309,6 +309,50 @@ function permissionSection() {
     group.append(opt);
   }
   sec.append(group, warn, el('p', 'sheet-muted', '对所有对话和定时任务生效；正在进行的回复保持原来的模式。'));
+  return sec;
+}
+
+/* ================= web images in replies ================= */
+
+const REMOTE_OPTIONS = [
+  ['auto', '自动显示', '回复里的网络图片由服务器代为下载并直接显示（手机在国内也能看到海外图片）。'],
+  ['click', '点击后显示', '先显示一个“加载图片”按钮，点了才下载。网页内容可能诱导助理在图片链接里夹带信息，对此有顾虑时选这个。'],
+];
+
+function remoteImagesSection() {
+  const sec = section('外链图片');
+  const current = h.prefs().remoteImages || 'auto';
+  const group = el('div', 'perm-list');
+  group.setAttribute('role', 'radiogroup');
+  group.setAttribute('aria-label', '回复中的网络图片');
+  for (const [value, label, desc] of REMOTE_OPTIONS) {
+    const opt = el('label', 'perm-opt');
+    const r = el('input');
+    r.type = 'radio';
+    r.name = 'remote-images';
+    r.value = value;
+    r.checked = value === current;
+    const text = el('span', 'perm-text');
+    text.append(el('span', 'perm-label', label), el('span', 'perm-desc', desc));
+    opt.append(r, text);
+    r.addEventListener('change', async () => {
+      if (!r.checked) return;
+      group.querySelectorAll('input').forEach((x) => { x.disabled = true; });
+      try {
+        const { prefs } = await h.api('/api/prefs', { method: 'PUT', body: { remoteImages: value } });
+        h.setPrefs(prefs);
+        h.rerender?.();
+        h.toast(`网络图片：${label}`);
+      } catch (err) {
+        if (err.status !== 401) h.toast(err.message);
+        group.querySelector(`input[value="${h.prefs().remoteImages || 'auto'}"]`).checked = true;
+      } finally {
+        group.querySelectorAll('input').forEach((x) => { x.disabled = false; });
+      }
+    });
+    group.append(opt);
+  }
+  sec.append(group, el('p', 'sheet-muted', '服务器上的本地图片（截图、生成的图表）总是直接显示。'));
   return sec;
 }
 
@@ -1152,7 +1196,7 @@ export function initExtras(hooks) {
   const viewer = $('image-viewer');
   // Tap anywhere except the bar's links closes the viewer.
   viewer.addEventListener('click', (e) => {
-    if (e.target.closest('[data-close]') || !e.target.closest('.viewer-bar')) viewer.close();
+    if (e.target.closest('[data-close]') || !e.target.closest('.viewer-bar, .viewer-nav')) viewer.close();
   });
   viewer.addEventListener('close', () => { $('viewer-img').removeAttribute('src'); });
   for (const id of ['settings-dialog', 'tasks-dialog', 'status-dialog']) {

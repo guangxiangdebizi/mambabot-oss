@@ -61,6 +61,9 @@ export function loadConfig(overrides = {}) {
     browserHeight: 800,
     browserSkipFirewall: false,
     browserEnabled: env.AW_BROWSER !== '0' && Boolean(env.AW_BROWSER_BIN),
+    // Web images in replies are fetched only from public addresses. A host whose DNS answers
+    // with a local proxy's "fake IPs" (TUN/fake-ip mode, 198.18.0.0/15) sets this to 1.
+    remoteFakeIp: env.AW_REMOTE_IMAGES_FAKE_IP === '1',
     ...overrides,
   };
 }

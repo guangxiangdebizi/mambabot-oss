@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { mkdir, open, readdir, realpath, stat } from 'node:fs/promises';
-import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { mkdir, readdir, realpath, stat } from 'node:fs/promises';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readJson, writeJsonAtomic } from './fsutil.js';
+import { HIDDEN_DIRS, SECRET_FILE, secretParts, within } from './hostfiles.js';
+import { buildPreview, previewPart, typeOf } from './preview.js';
 
 // A project is a directory on the server. Chats created in it run Claude with that directory
 // as the working directory, so they share its files, its CLAUDE.md and the CLI's per-directory
@@ -11,14 +13,6 @@ import { readJson, writeJsonAtomic } from './fsutil.js';
 
 export const DEFAULT_ROOT = 'default';
 const MAX_ENTRIES = 1000;
-const MAX_TEXT = 512 * 1024;
-const SNIFF = 8192;
-
-// Never listed or served, wherever they appear under a project.
-const HIDDEN_DIRS = new Set(['.git', '.ssh', '.gnupg', '.aws', '.kube', '.docker', '.password-store']);
-const SECRET_FILE = /^(\.env(\..*)?|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.pgpass|\.credentials\.json|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|.*\.(pem|key|p12|pfx|keystore|jks))$/i;
-const MARKDOWN = new Set(['.md', '.markdown', '.mdx']);
-const IMAGE = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
 
 export class FileError extends Error {
   constructor(status, message) {
@@ -26,8 +20,6 @@ export class FileError extends Error {
     this.status = status;
   }
 }
-
-const within = (path, root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 
 /** Display name as typed; the default directory name keeps it readable but filesystem-safe. */
 export function projectName(raw) {
@@ -149,7 +141,7 @@ export class ProjectStore {
     if (!within(real, root)) throw new FileError(403, '只能查看项目目录里的文件');
     const rel = relative(root, real);
     const parts = rel ? rel.split(sep) : [];
-    if (parts.some((p) => HIDDEN_DIRS.has(p)) || (parts.length && SECRET_FILE.test(parts[parts.length - 1]))) {
+    if (secretParts(parts)) {
       throw new FileError(403, '这个文件可能含有凭据，不能在网页上查看');
     }
     if ((await this.guardedReal()).some((g) => within(real, g))) throw new FileError(403, '这个文件可能含有凭据，不能在网页上查看');
@@ -173,32 +165,23 @@ export class ProjectStore {
     return { path: rel, entries: entries.slice(0, MAX_ENTRIES), truncated: entries.length > MAX_ENTRIES };
   }
 
-  /** What the preview needs: text (up to 512 KB) for text files, just metadata otherwise. */
-  async preview(key, raw) {
+  /** What the reader needs (see preview.js): text, tables, Office content, or just the kind. */
+  async preview(key, raw, { sheet = 0 } = {}) {
     const { real, rel } = await this.locate(key, raw);
-    const st = await stat(real);
-    if (st.isDirectory()) return { path: rel, kind: 'dir' };
-    const ext = extname(real).toLowerCase();
-    const base = { path: rel, name: basename(real), size: st.size, mtime: st.mtime.toISOString() };
-    if (IMAGE[ext]) return { ...base, kind: 'image' };
-    const fh = await open(real, 'r');
-    try {
-      const buf = Buffer.alloc(Math.min(st.size, MAX_TEXT));
-      await fh.read(buf, 0, buf.length, 0);
-      if (buf.subarray(0, SNIFF).includes(0)) return { ...base, kind: 'binary' };
-      let text = buf.toString('utf8');
-      if (st.size > MAX_TEXT) text = text.replace(/�+$/, '');
-      return { ...base, kind: MARKDOWN.has(ext) ? 'markdown' : 'text', text, truncated: st.size > MAX_TEXT };
-    } finally {
-      await fh.close();
-    }
+    return buildPreview(real, { display: rel, sheet });
   }
 
-  /** The file itself, for images and downloads. */
+  /** The file itself, for images, media, PDFs and downloads. */
   async raw(key, raw) {
     const { real } = await this.locate(key, raw);
     const st = await stat(real);
     if (!st.isFile()) throw new FileError(400, '这不是文件');
-    return { path: real, name: basename(real), size: st.size, type: IMAGE[extname(real).toLowerCase()] || null };
+    return { path: real, name: basename(real), size: st.size, type: typeOf(real) };
+  }
+
+  /** One image embedded in an Office file. */
+  async part(key, raw, entry) {
+    const { real } = await this.locate(key, raw);
+    return previewPart(real, entry);
   }
 }

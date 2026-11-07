@@ -4,8 +4,10 @@ import {
   browserSnapshot, close as closeBrowser, helpKindLabel, open as openBrowser, startBrowserEvents, stopBrowserEvents,
 } from './browser.js';
 import {
-  closeFiles, initFiles, openFiles, openPath, refreshFilesSoon, setFilesRoot,
+  closeFiles, initFiles, openFiles, openPath, openUpload, refreshFilesSoon, setFilesRoot,
 } from './files.js';
+import { isDataImage, mdImage, remoteImageUrl } from './reader.js';
+import { highlight } from './highlight.js';
 import {
   closeTerminal, initTerminal, openTerminal, refreshTerminalClaude, setTerminalRoot, showClaudeCommand,
 } from './terminal.js';
@@ -785,6 +787,7 @@ function startDraft(projectId = null) {
 
 async function openConversation(id) {
   closeStream();
+  imageNodes.clear();
   state.loading = true;
   state.editing = null;
   state.renderCount = MSG_PAGE;
@@ -909,6 +912,7 @@ function applyEvent(ev) {
     if (ev.usage) msg.usage = ev.usage;
     if (ev.queued) msg.queued = ev.queued;
     if (ev.background !== undefined) msg.background = ev.background;
+    if (ev.media) msg.media = ev.media;
   } else if (ev.type === 'status') {
     msg.status = ev.status;
     if (ev.error) msg.error = ev.error;
@@ -1113,8 +1117,69 @@ function attachmentView(a) {
   }
   const chip = el('a', 'file-chip');
   chip.href = `/api/uploads/${a.id}`;
+  // Opens in the reader (PDF, Word, Excel, PPT, media…); the reader has the download button.
+  chip.dataset.upload = a.id;
+  chip.dataset.name = a.name;
+  chip.title = `在网页中打开 ${a.name}`;
   chip.append(icon('file', 18), el('span', 'file-chip-name', a.name), el('span', 'file-chip-size', formatSize(a.size)));
   return chip;
+}
+
+/* ---------- images in replies ---------- */
+
+// Web images the owner tapped to load (when 外链图片 is set to 点击后显示).
+const revealed = new Set();
+// <img> nodes per message, reused while a reply streams so its images do not reload or flicker.
+const imageNodes = new Map();
+
+/**
+ * Where an image of a reply or a Markdown file loads from: the copy saved when the reply
+ * ended, the web (through the server's proxy), or a path on the host (relative ones against
+ * `resolveLocal`, i.e. the chat's directory or the Markdown file's).
+ */
+function imageTarget(srcText, { media = null, resolveLocal }) {
+  const src = String(srcText || '').trim();
+  if (media?.[src]) return { url: `/api/uploads/${encodeURIComponent(media[src].id)}` };
+  if (isDataImage(src)) return { url: src.replace(/\s+/g, '') };
+  if (/^https?:\/\//i.test(src)) {
+    const url = remoteImageUrl(src);
+    return { url, remote: true, deferred: state.prefs?.remoteImages === 'click' && !revealed.has(url) };
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) && !/^file:\/\//i.test(src)) return { url: null };
+  return { url: resolveLocal(src) };
+}
+
+const chatFileUrl = (path) => `/api/files/raw?path=${encodeURIComponent(path)}${state.conv?.id ? `&conv=${encodeURIComponent(state.conv.id)}` : ''}`;
+
+function replyMarkdownOptions(msg) {
+  let cache = imageNodes.get(msg.id);
+  if (!cache) { cache = new Map(); imageNodes.set(msg.id, cache); }
+  const used = new Set();
+  return {
+    image(tok, block) {
+      const t = imageTarget(tok.src, { media: msg.media, resolveLocal: chatFileUrl });
+      const key = `${block ? 'b' : 'i'}|${t.url}|${t.deferred ? 1 : 0}`;
+      const hit = cache.get(key);
+      if (hit && !used.has(key)) { used.add(key); return hit.replacement || hit; }
+      const node = mdImage({ ...t, alt: tok.alt, title: tok.title, block, src: tok.src });
+      if (!used.has(key)) { cache.set(key, node); used.add(key); }
+      return node;
+    },
+    highlight: (code, lang) => highlight(document, code, lang),
+    fileLink(path, label) {
+      const a = el('a', 'path-link file-link', label || path);
+      a.href = chatFileUrl(path);
+      a.dataset.path = path;
+      a.title = `在网页中打开 ${path}`;
+      return a;
+    },
+  };
+}
+
+/** For Markdown files in the reader: relative images resolve against the file's own folder. */
+function readerImage(tok, block, src) {
+  const t = imageTarget(tok.src, { resolveLocal: (p) => src.resolve(p)?.raw() || null });
+  return mdImage({ ...t, alt: tok.alt, title: tok.title, block, src: tok.src });
 }
 
 /** A file Claude showed with assistant-media show_file. */
@@ -1125,13 +1190,36 @@ function shownFile(part) {
   return fig;
 }
 
-function openViewer(src, name) {
+/** Full-screen image viewer; `list` ({ src, name }) adds previous/next (buttons, ←/→, swipe). */
+const gallery = { list: [], index: 0 };
+function openViewer(src, name, list = null, index = 0) {
+  gallery.list = list && list.length > 1 ? list : [{ src, name }];
+  gallery.index = list && list.length > 1 ? Math.max(0, index) : 0;
+  showViewerImage();
   const dlg = $('image-viewer');
+  if (!dlg.open) dlg.showModal();
+}
+function showViewerImage() {
+  const { src, name } = gallery.list[gallery.index];
   $('viewer-img').src = src;
   $('viewer-img').alt = name || '';
   $('viewer-name').textContent = name || '';
   $('viewer-open').href = src;
-  if (!dlg.open) dlg.showModal();
+  const many = gallery.list.length > 1;
+  $('viewer-prev').hidden = !many;
+  $('viewer-next').hidden = !many;
+  $('viewer-count').hidden = !many;
+  $('viewer-count').textContent = `${gallery.index + 1} / ${gallery.list.length}`;
+}
+function stepViewer(d) {
+  if (gallery.list.length < 2) return;
+  gallery.index = (gallery.index + d + gallery.list.length) % gallery.list.length;
+  showViewerImage();
+}
+/** Every zoomable image in a container, for the viewer's previous/next. */
+function galleryOf(root, link) {
+  const all = [...root.querySelectorAll('a[data-view]')].filter((a) => a.querySelector('img'));
+  return { list: all.map((a) => ({ src: a.href, name: a.dataset.view })), index: Math.max(0, all.indexOf(link)) };
 }
 
 function branchNav(msg) {
@@ -1254,6 +1342,7 @@ function sendCommand(text) {
 
 function fillAssistant(node, msg) {
   const body = el('div', 'msg-body');
+  const mdOpts = replyMarkdownOptions(msg);
   let tools = [];
   const flushTools = (running) => {
     if (!tools.length) return;
@@ -1272,7 +1361,7 @@ function fillAssistant(node, msg) {
     flushTools(live && i === msg.parts.length);
     if (part.type === 'text') {
       const div = el('div', 'md');
-      div.append(renderMarkdown(part.text));
+      div.append(renderMarkdown(part.text, document, mdOpts));
       linkPaths(div);
       body.append(div);
     } else if (part.type === 'approval') {
@@ -1666,7 +1755,7 @@ let attKey = 0;
 function addFiles(files) {
   for (const file of files) {
     if (state.attachments.length >= 8) { toast('一次最多 8 个附件'); break; }
-    if (file.size > 20 * 1024 * 1024) { toast(`${file.name || '文件'} 超过 20 MB`); continue; }
+    if (file.size > 50 * 1024 * 1024) { toast(`${file.name || '文件'} 超过 50 MB`); continue; }
     const a = {
       key: ++attKey, file, status: 'uploading', name: file.name || `粘贴的图片.${(file.type.split('/')[1] || 'png')}`,
       type: file.type, size: file.size, image: /^image\/(png|jpeg|gif|webp)$/.test(file.type),
@@ -1824,7 +1913,9 @@ $('open-tasks').addEventListener('click', () => { if (narrow.matches) setDrawer(
 $('open-settings').addEventListener('click', () => { if (narrow.matches) setDrawer(false); openSettings(); });
 $('perm-chip').addEventListener('click', () => openSettings());
 initResizers();
-initFiles({ api, toast, openViewer, closeOthers: () => { closeBrowser({ focus: false }); closeTerminal({ focus: false }); } });
+initFiles({
+  api, toast, openViewer, mdImage: readerImage, closeOthers: () => { closeBrowser({ focus: false }); closeTerminal({ focus: false }); },
+});
 initTerminal({ api, toast, claudeCommands, closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); } });
 const PANELS = { files: openFiles, terminal: openTerminal, browser: openBrowser };
 for (const b of document.querySelectorAll('.panel-tab[data-panel]')) b.addEventListener('click', () => PANELS[b.dataset.panel]());
@@ -1835,6 +1926,7 @@ initExtras({
   models: () => state.models,
   prefs: () => state.prefs || { model: 'default', effort: null },
   setPrefs: (p) => { state.prefs = { ...state.prefs, ...p }; updateModelChrome(); },
+  rerender: () => { imageNodes.clear(); render(); },
   confirm: (title, text) => confirmDialog(title, text, '删除', true),
   openConversation: (id) => { if (narrow.matches) setDrawer(false); openConversation(id); },
   renameCurrent: () => (state.conv?.id ? renameConversation(state.conv.id, state.conv.title || '') : toast('当前还没有对话')),
@@ -1886,14 +1978,27 @@ ui.groups.addEventListener('click', (e) => {
 });
 ui.convMenuBtn.addEventListener('click', () => state.conv && convMenu(ui.convMenuBtn, state.conv.id));
 ui.messages.addEventListener('click', (e) => {
+  const modified = e.ctrlKey || e.metaKey || e.shiftKey;
   const pathLink = e.target.closest('.path-link');
-  if (pathLink) { openPath(pathLink.dataset.path); return; }
+  if (pathLink) {
+    if (modified && pathLink.href) return;
+    e.preventDefault();
+    openPath(pathLink.dataset.path, state.conv?.id || null);
+    return;
+  }
   const toolOpen = e.target.closest('.tool-open');
   if (toolOpen) { showClaudeCommand(toolOpen.dataset.tool); return; }
   const view = e.target.closest('a[data-view]');
-  if (view && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+  if (view && !modified) {
     e.preventDefault();
-    openViewer(view.href, view.dataset.view);
+    const g = galleryOf(ui.messages, view);
+    openViewer(view.href, view.dataset.view, g.list, g.index);
+    return;
+  }
+  const upload = e.target.closest('a[data-upload]');
+  if (upload && !modified) {
+    e.preventDefault();
+    openUpload(upload.dataset.upload, upload.dataset.name);
     return;
   }
   const btn = e.target.closest('button[data-action]');
@@ -1910,8 +2015,31 @@ ui.messages.addEventListener('click', (e) => {
 });
 ui.messages.addEventListener('keydown', (e) => {
   const pathLink = e.key === 'Enter' && e.target.closest('.path-link');
-  if (pathLink) { e.preventDefault(); openPath(pathLink.dataset.path); }
+  if (pathLink) { e.preventDefault(); openPath(pathLink.dataset.path, state.conv?.id || null); }
 });
+// A web image waiting for a tap (外链图片: 点击后显示), in replies and in the reader.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('.md-img-load');
+  if (!b) return;
+  revealed.add(b.dataset.url);
+  b.replaceWith(mdImage({ url: b.dataset.url, alt: b.dataset.alt, block: b.dataset.block === '1', remote: true, src: b.dataset.alt }));
+});
+$('viewer-prev').addEventListener('click', () => stepViewer(-1));
+$('viewer-next').addEventListener('click', () => stepViewer(1));
+$('image-viewer').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); stepViewer(-1); } else if (e.key === 'ArrowRight') { e.preventDefault(); stepViewer(1); }
+});
+{
+  let x0 = null;
+  const stage = $('image-viewer');
+  stage.addEventListener('touchstart', (e) => { x0 = e.touches.length === 1 ? e.touches[0].clientX : null; }, { passive: true });
+  stage.addEventListener('touchend', (e) => {
+    if (x0 === null || gallery.list.length < 2) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    x0 = null;
+    if (Math.abs(dx) > 50) { stepViewer(dx < 0 ? 1 : -1); e.preventDefault(); }
+  });
+}
 ui.projChip.addEventListener('click', () => openFiles());
 ui.projectForm.addEventListener('submit', (e) => { e.preventDefault(); createProject(); });
 $('project-cancel').addEventListener('click', () => ui.projectDialog.close());

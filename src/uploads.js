@@ -4,12 +4,13 @@ import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { readJson, writeJsonAtomic } from './fsutil.js';
+import { typeOf } from './preview.js';
 
 // Attachments are saved under Claude's working directory, so the Read tool can open them
 // (text, code, PDF, images) without an extra approval. Images are also sent inline as image
 // content blocks so the model sees them directly.
 
-export const MAX_UPLOAD = 20 * 1024 * 1024;
+export const MAX_UPLOAD = 50 * 1024 * 1024;
 export const MAX_INLINE_IMAGE = 5 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 8;
 const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -22,7 +23,7 @@ const EXT_TYPES = {
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  '.mp4': 'video/mp4', '.mp3': 'audio/mpeg',
+  '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.tsv': 'text/tab-separated-values', '.ipynb': 'application/x-ipynb+json',
 };
 
 export function safeName(name) {
@@ -100,7 +101,7 @@ export class UploadStore {
     }
     const { size } = await stat(file);
     const item = {
-      id, name, type: EXT_TYPES[extname(name).toLowerCase()] || 'application/octet-stream',
+      id, name, type: EXT_TYPES[extname(name).toLowerCase()] || typeOf(name) || 'application/octet-stream',
       size, path: file, createdAt: new Date().toISOString(), source: 'claude',
     };
     this.items.set(id, item);

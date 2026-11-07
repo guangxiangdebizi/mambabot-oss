@@ -169,6 +169,7 @@
           <button id="fp-up" type="button" class="icon-btn" aria-label="返回目录" title="返回目录" data-icon="back"></button>
           <span id="fp-path" class="fp-path"></span>
           <button id="fp-source" type="button" class="btn btn-ghost btn-sm" hidden>源码</button>
+          <button id="fp-wide" type="button" class="icon-btn fp-wide-btn" aria-pressed="false" aria-label="全屏阅读" title="全屏阅读"></button>
           <a id="fp-download" class="icon-btn" aria-label="下载" title="下载" data-icon="download"></a>
         </div>
         <div id="fp-body" class="fp-body"></div>
@@ -288,10 +289,15 @@
   <dialog id="image-viewer" class="viewer" aria-label="查看图片">
     <div class="viewer-bar">
       <span id="viewer-name" class="viewer-name"></span>
+      <span id="viewer-count" class="viewer-count" hidden></span>
       <a id="viewer-open" class="link-btn" target="_blank" rel="noopener">原图</a>
       <button type="button" class="icon-btn" data-close aria-label="关闭" data-icon="x"></button>
     </div>
-    <img id="viewer-img" alt="">
+    <div class="viewer-stage">
+      <button id="viewer-prev" type="button" class="viewer-nav prev" aria-label="上一张" data-icon="chevron-left" hidden></button>
+      <img id="viewer-img" alt="">
+      <button id="viewer-next" type="button" class="viewer-nav next" aria-label="下一张" data-icon="chevron-right" hidden></button>
+    </div>
   </dialog>
   <dialog id="share-dialog" class="dialog share-dialog" aria-labelledby="share-title">
     <h2 id="share-title" class="dialog-title">分享对话</h2>

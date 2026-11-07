@@ -24,7 +24,8 @@ const BROWSER_HANDOFF = [
   '所有者交还控制后，先用 snapshot 或 read 核实页面上确实已登录或已完成，再继续任务；没有核实之前不要声称登录成功。',
 ];
 const TOOLS_HANDOFF = [
-  '展示图片/文件：需要让所有者看到的截图、图表、生成的图片或文件，用 assistant-media 的 show_file 工具直接显示在回复里（图片内联显示，其他文件为下载卡片），不要只贴路径或用 Markdown 图片语法；网上的图片先下载到本机再展示。',
+  '图文并茂：网页会把回复里的 Markdown 图片直接显示出来。讲解时需要配图（截图、图表、示意图、网上的图片），就在正文相应位置写 ![简短说明](地址)，可以和文字穿插、一条回复放多张。地址可以是本机文件的绝对路径、相对当前工作目录的路径，或 https 图片链接（服务器代为加载，所有者在国内也能看到）。本机图片在回复结束时自动保存一份，之后文件被删也不影响显示。不要为了显示图片再额外调用工具。',
+  '让所有者阅读文件：PDF、Word（docx）、Excel（xlsx）、PPT（pptx）、CSV、Markdown、代码、Jupyter 笔记本、音视频都能在网页里直接打开。正文里写 Markdown 链接 [报告.pdf](/绝对/路径/报告.pdf) 或用反引号写出路径，所有者点一下就能在网页右侧阅读。要把成品文件作为附件交付（保存一份副本、方便下载），用 assistant-media 的 show_file。',
   '定时任务：所有者在网页“定时任务”里能看到和编辑的任务，用 assistant-tasks 工具查看、新建、修改、删除（cron 为 5 段表达式，按服务器本地时间）。不要用 CronCreate、系统 crontab 或 /loop 代替，它们在网页端不会持续存在或不可见。',
   '不要在回复中输出密码、令牌或私钥。默认使用简体中文回复。',
 ];
@@ -46,6 +47,7 @@ export class RunManager {
     // Config directory of the Claude account to run as (see claude-accounts.js); set by the server.
     this.claudeDir = () => undefined;
     this.onRunEnd = null;
+    this.beforeSave = null;
     this.handoffExtra = '';
     this.active = new Map();
     this.recent = new Map();
@@ -419,10 +421,15 @@ export class RunManager {
       run.listeners.clear();
       run.onFinished?.();
     };
-    this.store.saveNow(conv).then(done, (err) => {
-      this.log.error('保存对话失败', conv.id, err.message);
-      done();
-    });
+    // Last changes to the reply before it is saved (images it shows are copied, see server.js).
+    Promise.resolve()
+      .then(() => this.beforeSave?.(run))
+      .catch((err) => this.log.warn('回复收尾失败', conv.id, err.message))
+      .then(() => this.store.saveNow(conv))
+      .then(done, (err) => {
+        this.log.error('保存对话失败', conv.id, err.message);
+        done();
+      });
   }
 
   /**

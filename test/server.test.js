@@ -188,7 +188,7 @@ test('models come from the CLI; selections are validated and persisted', async (
   assert.equal((await request(ctx.port, 'PUT', '/api/prefs', { body: { model: 'haiku', effort: 'max' }, cookie })).status, 400);
   assert.equal((await request(ctx.port, 'PUT', '/api/prefs', { body: { model: 'gpt-5' }, cookie })).status, 400);
   assert.equal((await request(ctx.port, 'PUT', '/api/prefs', { body: { model: 'haiku', effort: 'medium' }, cookie })).status, 200);
-  assert.deepEqual((await request(ctx.port, 'GET', '/api/models', { cookie })).json.prefs, { model: 'haiku', effort: 'medium', permissionMode: 'auto', maxRuns: 2 });
+  assert.deepEqual((await request(ctx.port, 'GET', '/api/models', { cookie })).json.prefs, { model: 'haiku', effort: 'medium', permissionMode: 'auto', maxRuns: 2, remoteImages: 'auto' });
   const id = await newConversation();
   const { run } = await send(id, 'args');
   const r = await readEvents(ctx.port, eventsPath(id, run), cookie);

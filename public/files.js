@@ -1,13 +1,13 @@
-// Read-only file panel: the current project's directory tree and a preview of one file
-// (Markdown rendered, code with line numbers, images inline, anything else as a download).
-import { renderMarkdown } from './markdown.js';
+// File panel: the current project's directory tree (read-only) and the reader, which opens
+// project files, any host file a reply names, and attachments (see reader.js for the kinds).
 import { icon } from './icons.js';
+import { fmtSize, hasSourceToggle, hostSource, projectSource, renderPreview, uploadSource } from './reader.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
   panel: $('files-panel'), chip: $('files-btn'), back: $('fp-back'), close: $('fp-close'), refresh: $('fp-refresh'),
   rootName: $('fp-root-name'), rootDir: $('fp-root-dir'), tree: $('fp-tree'), view: $('fp-view'), up: $('fp-up'),
-  path: $('fp-path'), source: $('fp-source'), download: $('fp-download'), body: $('fp-body'),
+  path: $('fp-path'), source: $('fp-source'), download: $('fp-download'), body: $('fp-body'), wide: $('fp-wide'),
 };
 const narrow = window.matchMedia('(max-width: 767px)');
 
@@ -18,8 +18,8 @@ const st = {
   dir: '',
   dirs: new Map(), // relative dir -> { entries, truncated } | { error }
   open: new Set(['']), // expanded dirs
-  file: null, // preview of the open file
-  showSource: false,
+  // The reader: where the open file comes from, its reader data, options (sheet), viewer handle.
+  view: null, // { src, file, params, error, loading, showSource, handle }
   seq: 0,
 };
 
@@ -31,17 +31,18 @@ const el = (tag, cls, text) => {
 };
 const base = () => `/api/projects/${encodeURIComponent(st.key)}`;
 const q = (path) => `?path=${encodeURIComponent(path)}`;
-const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
 export function isFilesOpen() { return !ui.panel.hidden; }
 
 /** Which directory the panel shows: follows the chat (its project, or the default one). */
 export function setFilesRoot(key, name) {
   if (key === st.key) { st.name = name; renderRoot(); return; }
-  Object.assign(st, { key, name, dir: '', file: null, showSource: false });
+  Object.assign(st, { key, name, dir: '' });
   st.dirs.clear();
   st.open = new Set(['']);
   st.seq += 1;
+  // A project file belongs to the old root; files from replies and attachments stay open.
+  if (st.view?.src.type === 'project') closeView();
   if (isFilesOpen()) load();
   renderRoot();
 }
@@ -59,6 +60,7 @@ export function closeFiles({ focus = true } = {}) {
   if (ui.panel.hidden) return;
   ui.panel.hidden = true;
   document.body.classList.remove('bp-open');
+  setWide(false);
   ui.chip.setAttribute('aria-expanded', 'false');
   if (focus) ui.chip.focus();
 }
@@ -84,7 +86,7 @@ async function load() {
   await Promise.all([...st.open].map(fetchDir));
   renderRoot();
   renderTree();
-  if (st.file) await showFile(st.file.path, { keepScroll: true, quiet: true });
+  if (st.view && !st.view.loading) await loadView(st.view.src, { quiet: true, keepScroll: true });
 }
 
 let soon = null;
@@ -95,37 +97,77 @@ export function refreshFilesSoon() {
   soon = setTimeout(load, 800);
 }
 
-/** Opens a path from a reply (relative to the project, or absolute inside it). */
-export async function openPath(path) {
-  if (!isFilesOpen()) openFiles();
-  await showFile(path);
+/**
+ * Opens a path from a reply: relative to the chat's directory, or absolute anywhere on the
+ * host (credential locations are refused by the server).
+ */
+export async function openPath(path, conv = null) {
+  await openSource(hostSource(path, conv));
 }
 
-async function showFile(path, { keepScroll = false, quiet = false } = {}) {
-  const seq = st.seq;
+/** Opens an attachment (or a file Claude showed) in the reader. */
+export async function openUpload(id, name) {
+  await openSource(uploadSource(id, name));
+}
+
+export async function openSource(src) {
+  if (!isFilesOpen()) openFiles();
+  await loadView(src);
+}
+
+function closeView() {
+  st.view?.handle?.destroy();
+  st.view = null;
+  renderView();
+}
+
+/** Fetches reader data for `src` and shows it; `params` (e.g. sheet) persist for refreshes. */
+async function loadView(src, { quiet = false, keepScroll = false, params } = {}) {
+  const same = st.view?.src.id === src.id;
+  const scroll = keepScroll && same ? ui.body.scrollTop : 0;
+  const view = {
+    src, file: same ? st.view.file : null, params: params || (same ? st.view.params : {}) || {},
+    showSource: same ? st.view.showSource : false, loading: true, handle: null,
+  };
+  if (!same || !quiet) {
+    st.view?.handle?.destroy();
+    st.view = view;
+    if (!same) renderView();
+  } else {
+    view.handle = st.view.handle;
+    st.view = view;
+  }
   let file;
   try {
-    ({ file } = await hooks.api(`${base()}/file${q(path)}`));
+    ({ file } = await hooks.api(src.preview(view.params)));
   } catch (err) {
-    if (seq !== st.seq || err.status === 401) return;
-    if (quiet) { st.file = null; renderView(); return; }
-    hooks.toast(err.status === 404 ? `找不到文件：${path}` : err.message);
+    if (st.view !== view || err.status === 401) return;
+    view.loading = false;
+    if (quiet) { if (err.status === 404) closeView(); return; }
+    view.error = err.status === 404 ? `找不到文件：${src.path || src.name || ''}` : err.message;
+    view.file = null;
+    renderView();
     return;
   }
-  if (seq !== st.seq) return;
-  if (file.kind === 'dir') {
+  if (st.view !== view) return;
+  view.loading = false;
+  if (file.kind === 'dir' && src.type === 'project') {
     // Expand the folder and every parent in the tree.
     const parts = file.path ? file.path.split('/') : [];
     for (let i = 0; i <= parts.length; i += 1) st.open.add(parts.slice(0, i).join('/'));
-    st.file = null;
+    st.view = null;
     renderView();
     await load();
     return;
   }
-  const same = st.file?.path === file.path;
-  const scroll = keepScroll && same ? ui.body.scrollTop : 0;
-  if (!same) st.showSource = false;
-  st.file = file;
+  // A quiet refresh of an unchanged file keeps the viewer (and its scroll position) as it is.
+  if (quiet && same && view.file && view.file.mtime === file.mtime && view.file.size === file.size) {
+    view.file = file;
+    return;
+  }
+  view.handle?.destroy();
+  view.handle = null;
+  view.file = file;
   renderView();
   ui.body.scrollTop = scroll;
 }
@@ -135,7 +177,7 @@ async function showFile(path, { keepScroll = false, quiet = false } = {}) {
 // Long paths are cut at the start (direction: rtl in CSS); the LRMs keep their slashes in place.
 function renderRoot() {
   ui.rootName.textContent = st.name || '默认工作目录';
-  ui.rootDir.textContent = st.dir ? `\u200e${st.dir}\u200e` : '';
+  ui.rootDir.textContent = st.dir ? `‎${st.dir}‎` : '';
   ui.rootDir.title = st.dir;
   const label = st.key && st.key !== 'default' ? `文件：${st.name}` : '文件';
   ui.chip.title = label;
@@ -154,17 +196,23 @@ function renderTree() {
   ui.tree.append(branch('', 0));
 }
 
+const FILE_ICONS = { image: 'image' };
+function kindIcon(name) {
+  return /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i.test(name) ? FILE_ICONS.image : 'file';
+}
+
 function branch(path, depth) {
   const data = st.dirs.get(path);
   const ul = el('ul', 'fp-list');
   ul.setAttribute('role', depth ? 'group' : 'presentation');
   if (!data) { ul.append(el('li', 'fp-note', '加载中…')); return ul; }
   if (data.error) { ul.append(el('li', 'fp-note', data.error)); return ul; }
+  const current = st.view?.src.type === 'project' ? st.view.src.path : null;
   for (const e of data.entries) {
     const rel = path ? `${path}/${e.name}` : e.name;
     const li = el('li');
     li.setAttribute('role', 'treeitem');
-    const b = el('button', `fp-item${st.file?.path === rel ? ' current' : ''}`);
+    const b = el('button', `fp-item${current === rel ? ' current' : ''}`);
     b.type = 'button';
     b.dataset.path = rel;
     b.dataset.type = e.type;
@@ -179,7 +227,7 @@ function branch(path, depth) {
       if (open) li.append(branch(rel, depth + 1));
     } else {
       const spacer = el('span', 'fp-chev');
-      b.append(spacer, icon('file', 16), el('span', 'fp-name', e.name), el('span', 'fp-size', fmtSize(e.size)));
+      b.append(spacer, icon(kindIcon(e.name), 16), el('span', 'fp-name', e.name), el('span', 'fp-size', fmtSize(e.size)));
       li.append(b);
     }
     ul.append(li);
@@ -188,50 +236,44 @@ function branch(path, depth) {
   return ul;
 }
 
-function lineView(text) {
-  const box = el('div', 'fp-code');
-  const lines = text.split('\n');
-  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-  const nums = el('pre', 'fp-ln', lines.map((_, i) => i + 1).join('\n'));
-  nums.setAttribute('aria-hidden', 'true');
-  const src = el('pre', 'fp-src');
-  src.append(el('code', '', lines.join('\n')));
-  box.append(nums, src);
-  return box;
+function displayPath(v) {
+  if (v.src.type === 'upload') return v.file?.name || v.src.name || '附件';
+  const p = v.file?.path || v.src.path || '';
+  // A host file inside the panel's root reads better relative to it.
+  if (v.src.type === 'host' && st.dir && p.startsWith(`${st.dir}/`)) return p.slice(st.dir.length + 1);
+  return p;
 }
 
 function renderView() {
-  const f = st.file;
-  ui.tree.hidden = Boolean(f);
-  ui.view.hidden = !f;
+  const v = st.view;
+  ui.tree.hidden = Boolean(v);
+  ui.view.hidden = !v;
   renderTree();
-  if (!f) return;
-  ui.path.textContent = `\u200e${f.path}\u200e`;
-  ui.path.title = f.path;
-  ui.download.href = `${base()}/raw${q(f.path)}&download=1`;
-  ui.source.hidden = f.kind !== 'markdown';
-  ui.source.textContent = st.showSource ? '预览' : '源码';
+  if (!v) return;
+  const shown = displayPath(v);
+  ui.path.textContent = `‎${shown}‎`;
+  ui.path.title = v.src.type === 'upload' ? `附件：${shown}` : (v.file?.path || v.src.path || '');
+  ui.download.href = v.src.raw({ download: 1 });
+  ui.source.hidden = !hasSourceToggle(v.file);
+  ui.source.textContent = v.showSource ? '预览' : '源码';
   ui.body.replaceChildren();
-  if (f.kind === 'markdown' && !st.showSource) {
-    const md = el('div', 'md fp-md');
-    md.append(renderMarkdown(f.text));
-    ui.body.append(md);
-  } else if (f.kind === 'markdown' || f.kind === 'text') {
-    ui.body.append(lineView(f.text));
-  } else if (f.kind === 'image') {
-    const img = el('img', 'fp-img');
-    img.src = `${base()}/raw${q(f.path)}&t=${encodeURIComponent(f.mtime)}`;
-    img.alt = f.name;
-    ui.body.append(img);
-  } else {
-    const box = el('div', 'fp-binary');
-    box.append(icon('file', 32), el('p', '', `${f.name} · ${fmtSize(f.size)}`), el('p', 'fp-note', '这个文件无法在网页里预览。'));
-    const a = el('a', 'btn btn-primary btn-sm', '下载');
-    a.href = ui.download.href;
-    box.append(a);
-    ui.body.append(box);
-  }
-  if (f.truncated) ui.body.append(el('p', 'fp-note', `文件较大（${fmtSize(f.size)}），只显示前 512 KB，完整内容请下载。`));
+  ui.body.dataset.kind = v.file?.kind || '';
+  if (v.error) { ui.body.append(el('p', 'fp-note', v.error)); return; }
+  if (!v.file) { ui.body.append(el('p', 'fp-note', '加载中…')); return; }
+  v.handle = renderPreview(ui.body, v.file, v.src, {
+    showSource: v.showSource,
+    reload: (params) => loadView(v.src, { params: { ...v.params, ...params } }),
+    openSource: (src) => loadView(src),
+    mdImage: hooks.mdImage,
+  });
+}
+
+function setWide(on) {
+  document.body.classList.toggle('fp-wide', on);
+  ui.wide.setAttribute('aria-pressed', String(on));
+  ui.wide.replaceChildren(icon(on ? 'collapse' : 'expand', 18));
+  ui.wide.title = on ? '退出全屏阅读' : '全屏阅读';
+  ui.wide.setAttribute('aria-label', ui.wide.title);
 }
 
 /* ---------- wiring ---------- */
@@ -239,12 +281,19 @@ function renderView() {
 export function initFiles(h) {
   hooks = h;
   renderRoot();
+  setWide(false);
   ui.chip.addEventListener('click', () => (isFilesOpen() ? closeFiles() : openFiles()));
   ui.close.addEventListener('click', () => closeFiles());
   ui.back.addEventListener('click', () => closeFiles());
   ui.refresh.addEventListener('click', load);
-  ui.up.addEventListener('click', () => { st.file = null; renderView(); });
-  ui.source.addEventListener('click', () => { st.showSource = !st.showSource; renderView(); });
+  ui.wide.addEventListener('click', () => setWide(!document.body.classList.contains('fp-wide')));
+  ui.up.addEventListener('click', () => closeView());
+  ui.source.addEventListener('click', () => {
+    if (!st.view) return;
+    st.view.handle?.destroy();
+    st.view.showSource = !st.view.showSource;
+    renderView();
+  });
   ui.tree.addEventListener('click', async (e) => {
     const b = e.target.closest('.fp-item');
     if (!b) return;
@@ -261,15 +310,20 @@ export function initFiles(h) {
       }
       ui.tree.querySelector(`.fp-item[data-path="${CSS.escape(path)}"]`)?.focus();
     } else {
-      showFile(path);
+      loadView(projectSource(st.key, path));
     }
   });
-  // Images open in the shared viewer, as in replies.
+  // Images (files, Markdown, documents, slides) open in the shared viewer, as in replies.
   ui.body.addEventListener('click', (e) => {
-    const img = e.target.closest('.fp-img');
-    if (img) hooks.openViewer?.(img.src, st.file?.name || '');
+    const link = e.target.closest('a[data-view]');
+    if (!link || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    e.preventDefault();
+    const all = [...ui.body.querySelectorAll('a[data-view]')];
+    hooks.openViewer?.(link.href, link.dataset.view, all.map((a) => ({ src: a.href, name: a.dataset.view })), all.indexOf(link));
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && isFilesOpen() && narrow.matches && !document.querySelector('dialog[open]')) closeFiles();
+    if (e.key !== 'Escape' || !isFilesOpen() || document.querySelector('dialog[open]')) return;
+    if (document.body.classList.contains('fp-wide')) setWide(false);
+    else if (narrow.matches) closeFiles();
   });
 }

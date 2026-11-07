@@ -15,9 +15,9 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 </p>
 
 > 截图都是真实运行的界面，用示例数据截取。上图中，Claude 在服务器上用 headless Chrome 截了一张网页，
-> 再用 `show_file` 工具把图片直接显示在回复里。
+> 图片直接显示在回复里。
 
-- **零依赖**：一个 Node.js 进程，没有 npm 依赖，也没有构建步骤。
+- **零依赖**：一个 Node.js 进程，没有 npm 依赖，也没有构建步骤（PDF 阅读用的 pdf.js 直接随仓库附带）。
 - **用的就是你的 Claude Code**：每条回复启动一次官方原版的 `claude -p`，订阅登录和 API Key 都可以用，权限规则和 CLI 完全一致。MambaBot 不经手你的 Claude 登录凭据（见[账号与 Anthropic 条款](#账号与-anthropic-条款)）。
 - **随时随地**：适配手机屏幕，可以添加到主屏幕；回复完成或需要授权时可以发通知提醒你。
 - **一切看得见**：项目文件、Claude 跑过的每条命令和输出、它正在用的浏览器，都在右侧面板里实时可见，你也可以自己动手。
@@ -43,27 +43,46 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 
 - **模型与推理强度**：可选的模型直接来自 CLI 的 `initialize`（Opus、Sonnet、Haiku……），每个对话可以单独选模型和推理强度。如果运行时实际用的模型和你选的不一样，页面会明确提示。
 - **分支**：编辑任何一条消息、重新生成任何一条回复，都会从当时的上下文分叉成新分支（`‹ 1/2 ›`），旧分支随时可以切回去。
-- **附件**：图片和文件（≤ 20 MB）可以直接拖进对话，图片会以图片形式发给 Claude。
-- **Claude 也能给你看东西**：截图、生成的图表、导出的文件，Claude 用 `show_file` 工具直接展示在回复里。图片点开可以全屏看，其他文件可以直接下载。
-- Markdown、表格、代码块一键复制，深色模式，全文搜索，导出 Markdown，只读分享链接。
+- **附件**：图片和文件（≤ 50 MB）可以直接拖进对话或粘贴，图片会以图片形式发给 Claude。附件点开就能在网页里阅读（见下文“文件阅读器”）。
+- **图文并茂**：回复里的 Markdown 图片 `![说明](地址)` 直接显示，Claude 可以一边讲一边配图，不用额外调用工具。地址可以是服务器上的绝对路径、相对工作目录的路径，或网络图片链接（由服务器代为加载，手机在国内也能看到海外图片）。几张图并排显示，点开全屏，可以左右切换。服务器上的图片在回复结束时自动存一份，之后原文件删了也照常显示。
+- **交付文件**：成品文件（报告、表格、压缩包……）Claude 用 `show_file` 作为附件卡片交给你，同样点开即读，也能下载。
+- Markdown（表格、任务列表、删除线等）、代码高亮和一键复制，深色模式，全文搜索，导出 Markdown，只读分享链接。
 
 <p align="center">
   <img src="docs/screenshots/desktop-model.png" alt="模型和推理强度选择" width="49%">
   <img src="docs/screenshots/desktop-dark.png" alt="深色模式下的代码块" width="49%">
 </p>
 
+### 文件阅读器
+
+不用下载，文件直接在网页右侧（手机上全屏）打开阅读，桌面上还可以切换到全屏阅读：
+
+| 类型 | 怎么显示 |
+|---|---|
+| PDF | 内置 pdf.js：中文正常显示，文字可以选中复制，缩放、页码，长文档按需渲染（手机不卡），带密码的 PDF 可以输入密码 |
+| Word（docx） | 标题、段落格式、编号和项目符号、表格（含合并单元格）、图片、链接 |
+| Excel（xlsx） | 多个工作表切换，合并单元格，日期、百分比、千分位等格式，行号列号 |
+| PowerPoint（pptx） | 逐页显示标题、文字层级、图片、表格和演讲者备注 |
+| CSV / TSV | 表格显示，自动识别 GBK 编码（Excel 导出的中文 CSV 不乱码） |
+| Markdown、代码、文本 | Markdown 排版（相对路径的图片也能显示，可切换源码），代码带行号，GBK 文本自动识别 |
+| Jupyter 笔记本 | Markdown 单元格、代码、文本输出和图表 |
+| 图片、音视频 | 图片可全屏，音视频可以拖动进度 |
+| HTML | 不运行脚本、不联网的安全预览，可切换源码 |
+
+打开方式：点回复里的文件链接 `[报告](路径)` 或反引号里的路径、你上传的附件、Claude 交付的文件卡片，或者文件面板的目录树。回复里提到的文件可以在项目目录之外（比如 `/tmp` 里的截图），但凭据和服务数据所在的位置一律打不开。旧版 `.doc/.xls/.ppt`、WPS 格式暂不支持预览，可以下载，或让 Claude 转成 PDF。
+
 ### 项目和文件面板
 
 - **项目**：侧边栏可以新建项目。每个项目对应服务器上的一个目录：默认新建 `<工作目录>/projects/<项目名>`，也可以指定已有目录。项目里的对话都以这个目录为工作目录运行 `claude -p`，所以共用其中的文件、项目级 `CLAUDE.md` 和 Claude Code 的记忆，不用每次重新交代背景。不用项目时一切照旧。
-- **文件面板**：右侧的“文件”面板（和浏览器面板切换）显示当前项目的目录树。Markdown 渲染成排版后的页面（可切换源码），代码和文本带行号，图片直接显示，其他文件可以下载。Claude 改完文件后面板自动刷新；回复里提到的文件路径可以点击打开。手机上全屏显示。
+- **文件面板**：右侧的“文件”面板（和浏览器面板切换）显示当前项目的目录树，点文件就用上面的阅读器打开。Claude 改完文件后面板自动刷新；回复里提到的文件路径可以点击打开。手机上全屏显示。
 - **终端面板**：右侧的“终端”里可以自己在项目目录下运行命令，输出实时显示，`cd` 会保留到下一条命令，命令需要输入时直接打字回车，随时可以停止（Ctrl+C）。Claude 在当前对话里运行过的每条命令也列在这里（标着“Claude”），点开能看完整命令和输出；回复里的“运行命令”也能一键跳过去。这里不是完整的终端模拟器（不能跑 vim、top 这类全屏程序），颜色和分页器都关掉了。
-- 文件面板只读，不在网页里编辑。只能访问项目目录内的文件，符号链接也不能跳出目录；`.env`、私钥、`.ssh`、`.git` 等不显示，也不能作为项目目录选中服务配置和数据目录。
+- 文件面板只读，不在网页里编辑。目录树只列项目目录内的文件，符号链接也不能跳出目录；`.env`、私钥、`.ssh`、`.git` 等不显示，也不能作为项目目录选中服务配置和数据目录。回复里提到的其他路径同样过一遍凭据黑名单（`~/.ssh`、`~/.claude`、服务配置和数据目录、浏览器配置、`/proc` 等）。
 
 ### 安全：每一步都在你眼皮底下
 
 - **授权卡片**：所有需要授权的工具调用（运行命令、写文件、联网……）都会变成一张卡片，上面是完整的命令或文件内容，由你允许或拒绝。服务器从不替你点"允许"。
 - **四种权限模式**：逐条确认 / 自动允许改文件 / 自动判断 / 完全放行，随时可以切换。
-- **登录**：随机生成的登录密钥，只保存 scrypt 哈希。Cookie 设了 `HttpOnly; SameSite=Strict; Secure`，并且校验 Origin 和 Host（防 DNS rebinding）。登录有限速，CSP 很严格，模型输出只当文本渲染、不当 HTML。
+- **登录**：随机生成的登录密钥，只保存 scrypt 哈希。Cookie 设了 `HttpOnly; SameSite=Strict; Secure`，并且校验 Origin 和 Host（防 DNS rebinding）。登录有限速，CSP 很严格，模型输出只当文本渲染、不当 HTML。Office 文档在服务器上解析成纯数据再显示，HTML 文件只在不运行脚本的沙箱里预览。
 
 <p align="center">
   <img src="docs/screenshots/mobile-approval.png" alt="授权卡片：写文件前先问你" width="24%">
@@ -89,7 +108,7 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 
 - 5 小时额度和每周额度的用量、重置时间直接读自 Claude Code（和终端 `/usage` 相同），读取时不调用模型。
 - **多个 Claude 账号**：同一台服务器上登录了你自己的几个 Claude 账号时，可以在这里切换，之后的回复和定时任务都用新账号，用量也显示新账号的。几个账号共用对话记录，切换后旧对话照常接着聊。
-- 权限模式、同时进行的回复数（1–6）、系统通知都在这里设置。
+- 权限模式、外链图片（自动显示 / 点击后显示）、同时进行的回复数（1–6）、系统通知都在这里设置。
 - 可选的**实时浏览器面板**：服务器上运行一个真实的 [BrowserOS](https://browseros.com)，Claude 操作浏览器时你在网页右侧实时看着。遇到登录、扫码、验证码，Claude 会把控制权交给你，你操作完再交还给它。
 
 <br clear="right">
@@ -124,7 +143,7 @@ node src/server.js                # 默认监听 127.0.0.1:3400
    ```sh
    tmux new-session -d -s assistant-web -c ~/mambabot-oss scripts/serve.sh
    ```
-3. 参照 `deploy/nginx.example.conf` 配置 nginx 和 HTTPS 证书。流式输出、实时浏览器面板和上传各有专门的 location，直接照抄即可。
+3. 参照 `deploy/nginx.example.conf` 配置 nginx 和 HTTPS 证书。流式输出、实时浏览器面板和上传各有专门的 location，直接照抄即可。（从 0.4 升级：附件上限改成了 50 MB，把 `/api/uploads` 里的 `client_max_body_size` 改成 `51m`。）
 4. 以后更新代码：`bash scripts/deploy.sh [commit]`。它会先跑测试和备份，切换后做健康检查，检查不通过会自动回滚。
 
 ### 配置
@@ -141,6 +160,7 @@ node src/server.js                # 默认监听 127.0.0.1:3400
 | `AW_CLAUDE_CWD` | `~/assistant-home` | Claude 的工作目录，网页会话和你在终端里用的会话互不干扰 |
 | `AW_DATA_DIR` / `AW_CONFIG_DIR` | `~/.local/share/assistant-web` / `~/.config/assistant-web` | 对话数据 / 登录凭据 |
 | `AW_BROWSER_BIN` / `AW_BROWSER_PROFILE` | — | 开启实时浏览器面板，需要 BrowserOS、Xvfb、x11vnc、noVNC，以及 `sudo -n iptables`（把 BrowserOS 的端口限制在本机） |
+| `AW_REMOTE_IMAGES_FAKE_IP` | `0` | 回复里的网络图片只从公网地址下载。服务器的 DNS 经过本机代理（TUN/fake-ip 模式，域名都解析到 198.18.x.x）时设成 `1` |
 | `TZ` | `serve.sh` 中为 `UTC` | 定时任务按服务器本地时间计算 |
 
 **多个 Claude 账号**：每个账号用一个单独的 Claude Code 配置目录登录，再让它和默认账号共用对话记录（会话按 id 续接，记忆也在这里）和 skills：
@@ -166,6 +186,7 @@ MambaBot 让一个网页登录直接拥有服务器上那个用户的全部能�
 - 对外访问一定要走 HTTPS（参考 `deploy/nginx.example.conf`）。
 - "完全放行"模式下，Claude 的工具调用不再逐条确认。如果这个用户还有免密 sudo，就等于网页登录直接拥有 root。
 - Claude 浏览网页时读到的内容可能含有提示注入。重要操作建议保持"逐条确认"或"自动判断"模式。
+- 回复里的网络图片由服务器代为下载（只连公网地址，不会被用来访问本机或内网服务）。被注入的内容理论上可以诱导助理把信息夹带在图片链接里发出去；有顾虑时在设置里把“外链图片”改成“点击后显示”。
 
 详细的安全模型见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model)。
 
@@ -179,7 +200,7 @@ MambaBot 只是官方 Claude Code 的一个网页前端，用的是你自己的�
 
 - 只调用 Anthropic 发布的原版 `claude` CLI，不修改它，也不替换它的登录方式。
 - 「多个 Claude 账号」只是切换 `CLAUDE_CONFIG_DIR`，让 CLI 用另一个已经登录好的配置目录；每个账号都要你自己在服务器上用 `/login` 登录。
-- 不读取、不保存、不转发你的 Claude 登录凭据：登录完全由 `claude` 自己的 `/login` 流程完成；网页登录密钥只用来进 MambaBot，和 Claude 账号无关；`~/.claude/.credentials.json` 在文件面板和 `show_file` 里都被禁止访问。
+- 不读取、不保存、不转发你的 Claude 登录凭据：登录完全由 `claude` 自己的 `/login` 流程完成；网页登录密钥只用来进 MambaBot，和 Claude 账号无关；`~/.claude` 整个目录（以及各个 Claude 账号的配置目录）在文件面板、阅读器和 `show_file` 里都被禁止访问。
 
 **你在部署和使用时需要注意**
 
@@ -199,7 +220,9 @@ MambaBot 只是官方 Claude Code 的一个网页前端，用的是你自己的�
 on your own server and with your own Claude Code login, built for phones as much as desktops. It is one dependency-free
 Node.js process that starts `claude -p` (stream-json) for each reply. It includes:
 
-- model and effort picker, branching chats (edit/regenerate fork the CLI session), attachments, and Claude showing you images and files inline
+- model and effort picker, branching chats (edit/regenerate fork the CLI session), attachments, and Claude showing you files inline
+- illustrated replies: Markdown images (`![](path or URL)`) render inline from host paths (saved when the reply ends) or the web (through an SSRF-safe server proxy), with a swipeable full-screen viewer
+- an in-page reader for PDF (bundled pdf.js), Word, Excel, PowerPoint (parsed on the server into plain data, no dependencies), CSV (GBK detected), Markdown, code, Jupyter notebooks, audio/video (range requests) and script-free HTML, for project files, attachments and any non-secret path a reply names
 - approval cards for every permission prompt, with four permission modes
 - a terminal panel: run your own commands in the project directory, and see every command Claude ran in the chat with its output
 - projects: chats grouped by a server directory that is their working directory (shared files, `CLAUDE.md` and memory), with a read-only file panel (Markdown rendered, code with line numbers, images, downloads; clickable paths in replies)
