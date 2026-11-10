@@ -62,6 +62,11 @@ test('usage payload is reduced to limits with reset times', () => {
   assert.equal(u.available, true);
   assert.deepEqual(u.limits.map((l) => [l.kind, l.percent]), [['session', 9], ['weekly_all', 12]]);
   assert.equal(u.limits[0].resetsAt, '2026-10-28T12:20:00.000Z');
+  const scoped = normalizeUsage({ rate_limits: { limits: [
+    { kind: 'weekly_scoped', group: 'weekly', percent: 0, scope: { model: { id: null, display_name: 'Fable' }, surface: null } },
+    { kind: 'weekly_scoped', group: 'weekly', percent: 5, scope: 'Opus' },
+  ] } });
+  assert.deepEqual(scoped.limits.map((l) => l.scope), ['Fable', 'Opus']);
 });
 
 test('account, usage and commands come from the CLI and need a session', async () => {

@@ -10,13 +10,20 @@ const FRESH_MS = 60 * 1000;
 const MIN_FORCE_GAP_MS = 10 * 1000;
 
 const isoOrNull = (v) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? new Date(v).toISOString() : null);
+// `scope` used to be a plain string; newer CLIs send { model: { display_name }, surface: { display_name } }.
+const scopeLabel = (s) => {
+  if (!s) return null;
+  if (typeof s !== 'object') return String(s);
+  const parts = [s.model, s.surface].map((x) => (x && typeof x === 'object' ? x.display_name || x.id : x)).filter(Boolean);
+  return parts.length ? parts.map(String).join(' · ') : null;
+};
 const pct = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(100, Math.round(Number(v)))) : null);
 
 /** Reduces the CLI's `get_usage` payload to what the page shows. */
 export function normalizeUsage(raw) {
   const rl = raw?.rate_limits || {};
   let limits = Array.isArray(rl.limits) ? rl.limits.map((l) => ({
-    kind: String(l.kind || ''), group: String(l.group || ''), scope: l.scope ? String(l.scope) : null,
+    kind: String(l.kind || ''), group: String(l.group || ''), scope: scopeLabel(l.scope),
     percent: pct(l.percent), severity: String(l.severity || 'normal'), resetsAt: isoOrNull(l.resets_at),
   })) : [];
   if (!limits.length) {
