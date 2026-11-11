@@ -149,7 +149,7 @@ export class RunManager {
   handoff(mode, cwd = this.cfg.claudeCwd, project = null) {
     return [
       ...HANDOFF,
-      project ? `这个对话属于项目“${project.name}”，工作目录就是项目目录：${cwd}。项目的文件、文档和 CLAUDE.md 都放在这里，所有者可以在网页右侧的“文件”面板里浏览和预览。` : `工作目录：${cwd}。`,
+      projectNote(project, cwd),
       ...(this.cfg.browserEnabled ? BROWSER_HANDOFF : []), ...TOOLS_HANDOFF,
       ...(this.handoffExtra ? [this.handoffExtra] : []), MODE_NOTE[mode],
     ].join('\n');
@@ -452,6 +452,20 @@ export class RunManager {
       this.terminate(run);
     })));
   }
+}
+
+/** Where the chat's project lives: this server, or one of the owner's computers over SSH. */
+export function projectNote(project, cwd) {
+  if (!project) return `工作目录：${cwd}。`;
+  const r = project.remote;
+  if (!r) return `这个对话属于项目“${project.name}”，工作目录就是项目目录：${cwd}。项目的文件、文档和 CLAUDE.md 都放在这里，所有者可以在网页右侧的“文件”面板里浏览和预览。`;
+  return [
+    `这个对话属于项目“${project.name}”。项目文件在所有者的远程机器「${r.name}」上：${r.path}${r.host ? `（服务器上的 SSH 别名 ${r.host}：用 ssh ${r.host} 执行命令，用 scp/sftp 传文件）` : ''}。`,
+    r.windows ? '这台机器是 Windows，ssh 登录后的默认 shell 是 PowerShell 或 cmd，不是 bash；路径用 Windows 写法。' : '',
+    `服务器上的工作目录 ${cwd} 只用来放这个项目的 CLAUDE.md、记忆和临时文件；所有者在网页右侧“文件”面板里看到的是远程目录，回复里写远程文件的完整路径即可。`,
+    r.missing ? '注意：这台远程机器已经从设置里删除。' : '',
+    r.offline ? `注意：发送这条消息时「${r.name}」无法连接（离线、休眠或网络断开）。不要反复尝试连接；先告诉所有者机器离线，说明哪些事要等它上线后再做。` : '',
+  ].filter(Boolean).join('');
 }
 
 /** Why Claude Code asks (e.g. a safety check that applies even under bypassPermissions). */

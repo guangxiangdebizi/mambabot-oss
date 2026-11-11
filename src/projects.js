@@ -59,11 +59,16 @@ export class ProjectStore {
     return this.items.find((p) => p.id === id) || null;
   }
 
-  /** `dir` empty: a new folder `<claudeCwd>/projects/<name>`; otherwise an existing directory. */
-  async create({ name: rawName, dir: rawDir }) {
+  /**
+   * `dir` empty: a new folder `<claudeCwd>/projects/<name>`; otherwise an existing directory.
+   * A remote project (`remote`: { machineId, path } on one of the owner's computers, checked by
+   * the caller) still gets a new folder here: Claude runs in it, with the project's CLAUDE.md
+   * and memory, and works on the remote files over SSH.
+   */
+  async create({ name: rawName, dir: rawDir, remote = null }) {
     const name = projectName(rawName);
     let dir;
-    if (rawDir && String(rawDir).trim()) {
+    if (rawDir && String(rawDir).trim() && !remote) {
       const given = String(rawDir).trim().replace(/^~(?=$|\/)/, homedir());
       if (!isAbsolute(given)) throw new FileError(400, '已有目录需要填写绝对路径');
       try {
@@ -81,7 +86,7 @@ export class ProjectStore {
     }
     await this.checkRoot(dir);
     if (this.items.some((p) => p.dir === dir)) throw new FileError(409, '已经有项目使用这个目录');
-    const project = { id: randomUUID(), name, dir, createdAt: new Date().toISOString() };
+    const project = { id: randomUUID(), name, dir, createdAt: new Date().toISOString(), ...(remote ? { remote } : {}) };
     this.items.push(project);
     await this.save();
     return project;

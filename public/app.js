@@ -4,8 +4,11 @@ import {
   browserSnapshot, close as closeBrowser, helpKindLabel, open as openBrowser, startBrowserEvents, stopBrowserEvents,
 } from './browser.js';
 import {
-  closeFiles, initFiles, openFiles, openPath, openUpload, refreshFilesSoon, setFilesRoot,
+  closeFiles, initFiles, openFiles, openPath, openRemote, openUpload, refreshFilesSoon, setFilesRoot,
 } from './files.js';
+import {
+  checkMachine, findMachine, folderPicker, initMachines, loadMachines, machines, onMachinesChange,
+} from './machines.js';
 import { isDataImage, mdImage, remoteImageUrl } from './reader.js';
 import { highlight } from './highlight.js';
 import {
@@ -35,7 +38,9 @@ const ui = {
   confirmText: $('confirm-text'), confirmOk: $('confirm-ok'), toast: $('toast'), live: $('live'),
   projChip: $('proj-chip'), projChipName: $('proj-chip-name'), projectDialog: $('project-dialog'),
   projectForm: $('project-form'), projectName: $('project-name'), projectDir: $('project-dir'),
-  projectHint: $('project-hint'), projectError: $('project-error'),
+  projectHint: $('project-hint'), projectError: $('project-error'), projectWhere: $('project-where'),
+  projectLoc: $('project-loc'), projectLocal: $('project-local'), projectRemote: $('project-remote'),
+  askMode: $('ask-mode'),
 };
 
 const EFFORT_LABEL = { low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' };
@@ -69,7 +74,10 @@ const PATH_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'
 const CHANGE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash']);
 // Inline code in a reply that looks like a file path: has a slash or a file extension, no spaces.
 const PATH_RE = /^(?:~\/|\.{1,2}\/|\/)?(?:[\w.\-\u4e00-\u9fff]+\/)*[\w\-\u4e00-\u9fff][\w.\-\u4e00-\u9fff]*(?:\.[A-Za-z][A-Za-z0-9]{0,7}|\/)$/;
-const looksLikePath = (s) => s.length < 300 && PATH_RE.test(s) && (s.includes('/') || /\.[A-Za-z]/.test(s)) && !/^\d/.test(s);
+// A Windows path (D:\Projects\x.docx) can only be on one of the owner's computers.
+const WIN_PATH_RE = /^[A-Za-z]:[\\/](?:[^\\/:*?"<>|\r\n]+[\\/])*[^\\/:*?"<>|\r\n]*$/;
+const looksLikePath = (s) => s.length < 300 && ((PATH_RE.test(s) && (s.includes('/') || /\.[A-Za-z]/.test(s)) && !/^\d/.test(s))
+  || (WIN_PATH_RE.test(s) && machines().length > 0));
 // The shown file itself appears in the reply, so its tool call needs no activity row.
 const isQuietTool = (name) => name === `${BROWSER_PREFIX}await_human_help` || name === 'mcp__assistant-media__show_file';
 
@@ -95,6 +103,7 @@ const state = {
   openProjects: new Set(), // expanded in the sidebar
   draftProject: null, // project of a chat that does not exist yet
   defaultDir: '',
+  askMode: 'add', // while a reply runs: 'add' joins the running turn, 'ask' is a side question (/btw)
 };
 const MSG_PAGE = 30;
 
@@ -221,7 +230,7 @@ async function showApp() {
   authed = true;
   try { state.openProjects = new Set(JSON.parse(store.get('aw.projOpen') || '[]')); } catch { /* keep none */ }
   startBrowserEvents(browserHooks);
-  await Promise.all([loadModels(), refreshList()]);
+  await Promise.all([loadModels(), refreshList(), loadMachines()]);
   const id = location.hash.slice(1);
   if (id) await openConversation(id);
   else startDraft();
@@ -438,6 +447,22 @@ async function refreshList() {
   }
   renderList();
   updateChrome();
+  checkRemoteProjects();
+}
+
+/** Online state of the machines remote projects live on (each checked at most once a minute). */
+function checkRemoteProjects() {
+  const ids = [...new Set(state.projects.filter((p) => p.remote).map((p) => p.remote.machineId))];
+  for (const id of ids) {
+    checkMachine(id).then((m) => {
+      if (!m) return;
+      let changed = false;
+      for (const p of state.projects) {
+        if (p.remote?.machineId === id && p.remote.online !== m.online) { p.remote.online = m.online; changed = true; }
+      }
+      if (changed) renderList();
+    });
+  }
 }
 
 /** Next page when the sidebar is scrolled to its end. */
@@ -525,10 +550,12 @@ function projectSection() {
     btn.type = 'button';
     btn.dataset.project = p.id;
     btn.setAttribute('aria-expanded', String(open));
-    btn.title = p.dir;
+    btn.title = p.remote ? `${p.remote.machine || '远程机器'}：${p.remote.display}` : p.dir;
     const label = el('span', 'conv-text');
     label.append(el('span', 'conv-title', p.name));
-    btn.append(icon(open ? 'chevron-down' : 'chevron-right', 14), icon('folder', 18), label);
+    // A project on one of the owner's computers names the machine, and says when it is offline.
+    if (p.remote) label.append(el('span', `conv-snippet proj-machine${p.remote.online === false ? ' offline' : ''}`, `${p.remote.machine || '远程机器（已删除）'}${p.remote.online === false ? ' · 离线' : ''}`));
+    btn.append(icon(open ? 'chevron-down' : 'chevron-right', 14), icon(p.remote ? 'monitor' : 'folder', 18), label);
     if (p.running && !open) btn.append(el('span', 'conv-running'));
     const more = iconButton('more', `项目“${p.name}”的选项`, 'icon-btn conv-more proj-more');
     more.dataset.project = p.id;
@@ -607,22 +634,59 @@ async function toggleProject(id) {
   ui.groups.querySelector(`.proj-item[data-project="${CSS.escape(id)}"]`)?.focus();
 }
 
+const LOCAL_HINT = () => `目录留空时新建 ${state.defaultDir ? `${state.defaultDir}/projects/` : 'projects/'}<名称>；也可以填服务器上已有目录的绝对路径。项目里的对话都在这个目录中运行，共用其中的文件、CLAUDE.md 和记忆。`;
+// The folder chosen in the remote picker (new project on one of the owner's computers).
+let pickedDir = '';
+
 function newProject() {
   ui.projectName.value = '';
   ui.projectDir.value = '';
-  ui.projectHint.textContent = `目录留空时新建 ${state.defaultDir ? `${state.defaultDir}/projects/` : 'projects/'}<名称>；也可以填服务器上已有目录的绝对路径。项目里的对话都在这个目录中运行，共用其中的文件、CLAUDE.md 和记忆。`;
   setError(ui.projectError, '');
+  // Location: this server, or one of the remote machines set up in Settings.
+  const ms = machines();
+  ui.projectWhere.hidden = !ms.length;
+  ui.projectLoc.replaceChildren();
+  const opt = (value, text) => { const o = el('option', '', text); o.value = value; ui.projectLoc.append(o); };
+  opt('', '云机（这台服务器）');
+  for (const m of ms) opt(m.id, `${m.name} · ${m.host}${m.online === false ? '（离线）' : ''}`);
+  ui.projectLoc.value = '';
+  projectLocation();
   ui.projectDialog.showModal();
   ui.projectName.focus();
+}
+
+function projectLocation() {
+  const m = findMachine(ui.projectLoc.value);
+  ui.projectLocal.hidden = Boolean(m);
+  ui.projectRemote.hidden = !m;
+  ui.projectRemote.replaceChildren();
+  pickedDir = '';
+  if (!m) { ui.projectHint.textContent = LOCAL_HINT(); return; }
+  const manual = el('input');
+  manual.id = 'project-rdir';
+  manual.autocomplete = 'off';
+  manual.spellcheck = false;
+  manual.placeholder = m.roots[0]?.display || '';
+  const label = el('label', 'field-label', '或直接填写路径');
+  label.htmlFor = manual.id;
+  ui.projectRemote.append(el('span', 'field-label', '选择文件夹'), folderPicker(m, (path) => { pickedDir = path; }), label, manual);
+  ui.projectHint.textContent = `项目文件留在 ${m.name} 上，Claude 仍在服务器上运行（工作目录 projects/<名称>，放这个项目的 CLAUDE.md 和记忆），通过 ssh ${m.host} 操作这些文件。只能选设置里允许浏览的目录。`;
 }
 
 async function createProject() {
   const name = ui.projectName.value.trim();
   if (!name) { setError(ui.projectError, '请填写项目名称'); return; }
+  const machine = findMachine(ui.projectLoc.value);
+  const body = { name, dir: ui.projectDir.value.trim() };
+  if (machine) {
+    const typed = $('project-rdir')?.value.trim();
+    Object.assign(body, { dir: '', machineId: machine.id, remoteDir: typed || pickedDir });
+    if (!body.remoteDir) { setError(ui.projectError, '请选择或填写这台电脑上的文件夹'); return; }
+  }
   const submit = ui.projectForm.querySelector('[type="submit"]');
   submit.disabled = true;
   try {
-    const { project } = await api('/api/projects', { method: 'POST', body: { name, dir: ui.projectDir.value.trim() } });
+    const { project } = await api('/api/projects', { method: 'POST', body });
     ui.projectDialog.close();
     state.openProjects.add(project.id);
     saveOpenProjects();
@@ -799,6 +863,7 @@ async function openConversation(id) {
     state.conv = conversation;
     state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : null;
     history.replaceState(null, '', `#${id}`);
+    pollRunningSide();
     if (conversation.projectId && !state.openProjects.has(conversation.projectId)) {
       state.openProjects.add(conversation.projectId);
       saveOpenProjects();
@@ -881,6 +946,7 @@ async function reloadCurrent() {
     state.conv = conversation;
     state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : state.run;
     hideBanner();
+    pollRunningSide();
     if (conversation.run) openStream(conversation.run.id, conversation.run.seq);
   } catch (err) {
     if (err.status === 0) {
@@ -979,19 +1045,28 @@ function updateChrome() {
   ui.stop.hidden = !showStop;
   ui.send.hidden = showStop;
   ui.input.placeholder = live ? '补充或纠正，会在当前步骤完成后交给 Claude' : '给 MambaBot 发消息';
-  ui.send.setAttribute('aria-label', live ? '追加到当前任务' : '发送');
+  const asking = live && state.askMode === 'ask';
+  ui.askMode.hidden = !live;
+  for (const b of ui.askMode.querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.mode === state.askMode));
+  if (live) ui.input.placeholder = asking ? '提问：马上由旁路回答，不打断当前任务' : '补充要求：Claude 完成当前步骤后会看到';
+  ui.send.setAttribute('aria-label', asking ? '旁路提问' : (live ? '追加到当前任务' : '发送'));
   const stopping = runMessage()?.status === 'stopping';
   ui.stop.disabled = stopping;
   ui.stop.setAttribute('aria-label', stopping ? '正在停止' : '停止生成');
   ui.send.disabled = state.sending || state.loading || uploading || !hasContent
     || state.attachments.some((a) => a.status === 'error') || !state.models.length;
-  ui.send.title = uploading ? '附件上传中…' : (live ? '追加到当前任务' : '发送');
-  ui.convMenuBtn.hidden = !conv || state.loading;
+  ui.send.title = uploading ? '附件上传中…' : (asking ? '旁路提问' : (live ? '追加到当前任务' : '发送'));
+  ui.convMenuBtn.hidden = !conv?.id || state.loading;
   const project = currentProject();
   ui.projChip.hidden = !project;
   ui.projChipName.textContent = project?.name || '';
-  ui.projChip.title = project ? `项目目录：${project.dir}（点击浏览文件）` : '';
-  setFilesRoot(project ? project.id : 'default', project?.name || '');
+  ui.projChip.title = project ? (project.remote
+    ? `项目在 ${project.remote.machine || '远程机器'}：${project.remote.display}（点击浏览文件）`
+    : `项目目录：${project.dir}（点击浏览文件）`) : '';
+  const pr = project?.remote ? {
+    machineId: project.remote.machineId, root: project.remote.path, label: project.remote.machine || '远程机器', display: project.remote.display,
+  } : null;
+  setFilesRoot(project ? project.id : 'default', project?.name || '', pr);
   setTerminalRoot(project ? project.id : 'default', project?.name || '');
 }
 
@@ -1033,7 +1108,9 @@ function renderMessages() {
   if (!state.conv || path.length === 0) {
     const project = currentProject();
     box.append(project
-      ? emptyState(`项目：${project.name}`, `这个对话在项目目录 ${project.dir} 中运行，和同一项目的其他对话共用这里的文件、CLAUDE.md 和记忆。Claude 写的文档可以在右侧“文件”面板里预览。`)
+      ? emptyState(`项目：${project.name}`, project.remote
+        ? `项目文件在 ${project.remote.machine || '远程机器'} 的 ${project.remote.display}，Claude 会通过 SSH 操作它们${project.remote.online === false ? '（这台电脑现在离线）' : ''}。同一项目的对话共用服务器上 ${project.dir} 里的 CLAUDE.md 和记忆；右侧“文件”面板显示远程目录。`
+        : `这个对话在项目目录 ${project.dir} 中运行，和同一项目的其他对话共用这里的文件、CLAUDE.md 和记忆。Claude 写的文档可以在右侧“文件”面板里预览。`)
       : emptyState('有什么可以帮忙的？', '可以发送文字、图片或文件。需要授权的操作，会在对话里请你确认。'));
     return;
   }
@@ -1055,6 +1132,7 @@ function renderMessages() {
     node.dataset.id = msg.id;
     fillMessage(node, msg);
     box.append(node);
+    for (const b of state.conv.btw || []) if (b.anchorId === msg.id) box.append(btwCard(b));
   }
   if (focusKey) box.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
 }
@@ -1257,6 +1335,11 @@ function fillUser(node, msg) {
   }
   const text = textOf(msg);
   if (text) node.append(el('div', 'bubble', text));
+  if (msg.status === 'sending') {
+    node.classList.add('sending');
+    node.append(el('div', 'msg-sending', '发送中…'));
+    return;
+  }
   const actions = el('div', 'msg-actions');
   const copy = iconButton('copy', '复制');
   copy.dataset.action = 'copy-msg';
@@ -1377,7 +1460,7 @@ function fillAssistant(node, msg) {
     }
   });
   flushTools(live);
-  for (const q of msg.queued || []) body.append(followupView(q, true));
+  for (const q of msg.queued || []) body.append(followupView(q, true, msg));
   node.append(body);
 
   const status = renderStatus(msg);
@@ -1418,8 +1501,23 @@ function markPath(node, path) {
   node.title = '在文件面板中打开';
 }
 
+/**
+ * Where a queued message waits: Claude sees it once the step it is on ends, so name that step
+ * (and how long it has been running) instead of a vague "after the current step".
+ */
+function queuedNote(part, msg) {
+  if (part.sending) return '发送中…';
+  const step = [...(msg?.parts || [])].reverse().find((p) => p.type === 'tool' && p.state === 'running');
+  if (step) {
+    const mins = step.at ? Math.floor((Date.now() - new Date(step.at)) / 60000) : 0;
+    return `已排队 · Claude 完成「${toolLabel(step.name)}${mins >= 1 ? `（已 ${mins} 分钟）` : ''}」后会看到`;
+  }
+  if (msg?.parts.some((p) => p.type === 'approval' && p.state === 'pending')) return '已排队 · 你处理完授权、Claude 做完这一步后会看到';
+  return '已排队 · Claude 完成当前这一步后会看到';
+}
+
 /** A message the owner added while this reply ran: queued, seen by Claude, or never delivered. */
-function followupView(part, queued = false) {
+function followupView(part, queued = false, msg = null) {
   const box = el('div', `followup${queued ? ' queued' : ''}${part.undelivered ? ' undelivered' : ''}`);
   if (part.attachments?.length) {
     const files = el('div', 'user-attach');
@@ -1427,7 +1525,11 @@ function followupView(part, queued = false) {
     box.append(files);
   }
   if (part.text) box.append(el('div', 'bubble', part.text));
-  if (queued) box.append(el('div', 'followup-note', '排队中 · 当前步骤完成后交给 Claude'));
+  if (queued) {
+    const note = el('div', 'followup-note', queuedNote(part, msg));
+    if (!part.sending) note.title = '想马上得到回答、又不打断任务，可以在输入框旁切到“提问”，或发送 /btw 问题';
+    box.append(note);
+  }
   if (part.undelivered) {
     const note = el('div', 'followup-note', '未送达：回复在这条消息送达前已结束');
     if (part.text) {
@@ -1604,6 +1706,7 @@ async function ensureConversation() {
 }
 
 function afterStart(res) {
+  state.askMode = 'add';
   state.conv.leafId = res.leafId;
   state.run = { id: res.run.id, messageId: res.run.messageId };
   state.conv.settings = { model: res.assistantMessage.requested.model, effort: res.assistantMessage.requested.effort || null };
@@ -1612,63 +1715,343 @@ function afterStart(res) {
   refreshList();
 }
 
-async function send() {
+const localId = () => `local-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+/** Puts the text back into an empty composer after a failed send (never over newer typing). */
+function restoreComposer(text, attachments = []) {
+  if (ui.input.value.trim() || state.attachments.length) {
+    for (const a of attachments) if (a.url) URL.revokeObjectURL(a.url);
+    return false;
+  }
+  ui.input.value = text;
+  state.attachments = attachments;
+  renderAttachments();
+  autosize();
+  return true;
+}
+
+/**
+ * Sends the composer. The message shows at once (marked 发送中) and the composer clears; if the
+ * request fails both come back with the reason. A new chat is created by the same request.
+ * While a reply runs the text joins it (补充) or goes to a side question (提问, or /btw …).
+ */
+async function send(extra = {}) {
   const text = ui.input.value.trim();
   const ready = state.attachments.filter((a) => a.status === 'ready');
   if ((!text && !ready.length) || state.sending) return;
   if (state.attachments.some((a) => a.status === 'uploading')) { setError(ui.composerError, '附件还在上传，请稍候'); return; }
   setError(ui.composerError, '');
+  const btw = text.match(/^\/btw(?:\s+([\s\S]*))?$/);
+  if (btw || (isLive() && state.askMode === 'ask')) {
+    const question = btw ? (btw[1] || '').trim() : text;
+    if (!question) { setError(ui.composerError, '用法：/btw 你的问题'); return; }
+    if (ready.length) { setError(ui.composerError, '旁路提问不能带附件'); return; }
+    askSide(question);
+    return;
+  }
   if (isLive()) { sendFollowup(text, ready); return; }
+  state.sending = true;
+  const saved = { text: ui.input.value, attachments: state.attachments.slice() };
+  const draft = !state.conv;
+  if (draft) {
+    state.conv = {
+      id: null, title: '', messages: [], leafId: null, settings: null, projectId: state.draftProject, btw: [], pending: true,
+    };
+  }
+  const conv = state.conv;
+  const path = visiblePath();
+  const parentId = path.length ? path[path.length - 1].id : null;
+  const temp = {
+    id: localId(), role: 'user', parentId, createdAt: new Date().toISOString(), status: 'sending',
+    parts: [{ type: 'text', text }], attachments: ready.map((a) => ({ id: a.id, name: a.name, type: a.type, size: a.size, image: a.image })),
+  };
+  const prevLeaf = conv.leafId;
+  conv.messages.push(temp);
+  conv.leafId = temp.id;
+  ui.input.value = '';
+  state.attachments = [];
+  renderAttachments();
+  autosize();
+  render(true);
+  let retryOffline = false;
+  try {
+    const attachments = ready.map((a) => a.id);
+    let res;
+    if (draft) {
+      res = await api('/api/conversations', {
+        method: 'POST', body: { ...selBody(), projectId: conv.projectId || undefined, message: { text, attachments }, ...extra },
+      });
+      Object.assign(conv, res.conversation, { pending: false });
+      if (state.conv === conv) history.replaceState(null, '', `#${conv.id}`);
+    } else {
+      res = await api(`/api/conversations/${conv.id}/messages`, {
+        method: 'POST', body: { text, parentId, attachments, ...selBody(), ...extra },
+      });
+    }
+    conv.messages = conv.messages.filter((m) => m !== temp);
+    conv.messages.push(res.userMessage, res.assistantMessage);
+    for (const a of saved.attachments) if (a.url) URL.revokeObjectURL(a.url);
+    if (state.conv !== conv) { refreshList(); return; }
+    if (!conv.title) conv.title = (text || ready[0]?.name || '').slice(0, 40);
+    afterStart(res);
+  } catch (err) {
+    conv.messages = conv.messages.filter((m) => m !== temp);
+    conv.leafId = prevLeaf;
+    if (state.conv !== conv) return;
+    if (draft) state.conv = null;
+    const restored = restoreComposer(saved.text, saved.attachments);
+    render();
+    if (err.status === 409 && err.data?.remoteOffline && restored) retryOffline = `${err.data.machine || '这台电脑'} `;
+    else if (err.status !== 401) setError(ui.composerError, `发送失败：${err.message}${restored ? '。内容已放回输入框，可以重试' : ''}`);
+  } finally {
+    state.sending = false;
+    updateChrome();
+  }
+  // The project's computer is offline: ask before sending anyway (Claude is told so).
+  if (retryOffline && await confirmDialog('远程机器离线', `${retryOffline}当前离线，Claude 无法访问项目文件。仍然发送吗？发送后会告诉 Claude 这台电脑离线，不让它反复尝试连接。`, '仍然发送', false)) send({ ignoreOffline: true });
+}
+
+/** Adds to the running reply; Claude Code picks it up after the step it is on. */
+async function sendFollowup(text, ready) {
+  const conv = state.conv;
+  const msgId = state.run.messageId;
+  const saved = { text: ui.input.value, attachments: state.attachments.slice() };
+  const temp = {
+    id: localId(), text, createdAt: new Date().toISOString(), sending: true,
+    attachments: ready.map((a) => ({ id: a.id, name: a.name, type: a.type, size: a.size, image: a.image })),
+  };
+  const msg = byId().get(msgId);
+  if (msg) { msg.queued = [...(msg.queued || []), temp]; scheduleMessageRender(msg); }
+  ui.input.value = '';
+  state.attachments = [];
+  renderAttachments();
+  autosize();
   state.sending = true;
   updateChrome();
   try {
-    const convId = await ensureConversation();
-    const path = visiblePath();
-    const parentId = path.length ? path[path.length - 1].id : null;
-    const res = await api(`/api/conversations/${convId}/messages`, {
-      method: 'POST', body: { text, parentId, attachments: ready.map((a) => a.id), ...selBody() },
+    const { followup } = await api(`/api/conversations/${conv.id}/followups`, {
+      method: 'POST', body: { text, attachments: ready.map((a) => a.id) },
     });
-    if (state.conv?.id !== convId) return;
-    ui.input.value = '';
-    clearAttachments();
-    autosize();
-    state.conv.messages.push(res.userMessage, res.assistantMessage);
-    if (!state.conv.title) state.conv.title = (text || ready[0]?.name || '').slice(0, 40);
-    afterStart(res);
+    for (const a of saved.attachments) if (a.url) URL.revokeObjectURL(a.url);
+    // The stream usually reports it too; whichever comes first shows it.
+    const m = conv.messages.find((x) => x.id === msgId);
+    if (m) {
+      m.queued = (m.queued || []).filter((q) => q !== temp);
+      if (!m.queued.some((q) => q.id === followup.id) && !m.parts.some((p) => p.id === followup.id)) m.queued.push(followup);
+      if (state.conv === conv) scheduleMessageRender(m);
+    }
   } catch (err) {
-    if (err.status !== 401) setError(ui.composerError, err.message);
+    const m = conv.messages.find((x) => x.id === msgId);
+    if (m) m.queued = (m.queued || []).filter((q) => q !== temp);
+    if (state.conv !== conv) return;
+    if (m) scheduleMessageRender(m);
+    const restored = restoreComposer(saved.text, saved.attachments);
+    if (err.status !== 401) setError(ui.composerError, `${err.message}${restored ? '（内容已放回输入框）' : ''}`);
   } finally {
     state.sending = false;
     updateChrome();
   }
 }
 
-/** Adds to the running reply; Claude Code picks it up after the step it is on. */
-async function sendFollowup(text, ready) {
-  const convId = state.conv.id;
-  const msgId = state.run.messageId;
-  state.sending = true;
-  updateChrome();
+/* ---------- side questions (/btw) ---------- */
+
+const sidePolls = new Map();
+
+/** Asks a side question: answered right away by a separate read-only session. */
+async function askSide(question) {
+  const conv = state.conv;
+  if (!conv?.id || !visiblePath().length) { setError(ui.composerError, '先发一条消息，再旁路提问'); return; }
+  const anchorId = isLive() ? state.run.messageId : conv.leafId;
+  const temp = { id: localId(), question, answer: '', status: 'running', anchorId, createdAt: new Date().toISOString() };
+  conv.btw = [...(conv.btw || []), temp];
+  const savedText = ui.input.value;
+  ui.input.value = '';
+  autosize();
+  render();
   try {
-    const { followup } = await api(`/api/conversations/${convId}/followups`, {
-      method: 'POST', body: { text, attachments: ready.map((a) => a.id) },
-    });
-    if (state.conv?.id !== convId) return;
-    ui.input.value = '';
-    clearAttachments();
-    autosize();
-    // The stream usually reports it too; whichever comes first shows it.
-    const msg = byId().get(msgId);
-    if (msg && !msg.queued?.some((q) => q.id === followup.id) && !msg.parts.some((p) => p.id === followup.id)) {
-      msg.queued = [...(msg.queued || []), followup];
-      scheduleMessageRender(msg);
-    }
+    const { btw } = await api(`/api/conversations/${conv.id}/btw`, { method: 'POST', body: { text: question } });
+    if (state.conv?.id !== conv.id) return;
+    state.conv.btw = (state.conv.btw || []).filter((b) => b !== temp && b.id !== btw.id).concat(btw);
+    render();
+    pollSide(btw.id);
   } catch (err) {
-    if (err.status !== 401) setError(ui.composerError, err.message);
-  } finally {
-    state.sending = false;
-    updateChrome();
+    conv.btw = (conv.btw || []).filter((b) => b !== temp);
+    if (state.conv !== conv) return;
+    render();
+    const restored = restoreComposer(savedText);
+    if (err.status !== 401) setError(ui.composerError, `${err.message}${restored ? '（问题已放回输入框）' : ''}`);
   }
+}
+
+function pollRunningSide() {
+  for (const b of state.conv?.btw || []) if (b.status === 'running' && !b.id.startsWith('local-')) pollSide(b.id);
+}
+
+/** Follows one side question until it is answered (the answer text grows as it streams). */
+function pollSide(id) {
+  if (sidePolls.has(id)) return;
+  const convId = state.conv.id;
+  const stop = () => { clearTimeout(sidePolls.get(id)); sidePolls.delete(id); };
+  const tick = async () => {
+    if (state.conv?.id !== convId) { stop(); return; }
+    try {
+      const { btw } = await api(`/api/conversations/${convId}/btw/${id}`);
+      const list = state.conv?.id === convId ? state.conv.btw || [] : [];
+      const i = list.findIndex((b) => b.id === id);
+      if (i < 0) { stop(); return; }
+      const changed = list[i].answer !== btw.answer || list[i].status !== btw.status;
+      list[i] = btw;
+      if (changed) updateBtw(btw);
+      if (btw.status !== 'running') {
+        stop();
+        if (btw.status === 'done') announce('旁路提问已回答');
+        return;
+      }
+    } catch (err) {
+      if (err.status === 404 || err.status === 401) { stop(); return; }
+    }
+    sidePolls.set(id, setTimeout(tick, 900));
+  };
+  sidePolls.set(id, setTimeout(tick, 500));
+}
+
+function updateBtw(b) {
+  const node = ui.messages.querySelector(`[data-btw="${CSS.escape(b.id)}"]`);
+  if (!node) return;
+  node.replaceWith(btwCard(b));
+  if (state.stick) scrollToBottom();
+}
+
+function btwCard(b) {
+  const box = el('section', `btw btw-${b.status}`);
+  box.dataset.btw = b.id;
+  box.setAttribute('aria-label', '旁路提问');
+  const head = el('div', 'btw-head');
+  head.append(icon('question', 16), el('span', 'btw-label', '旁路提问'), el('span', 'btw-sub', '不打断主任务，也不进入对话上下文'));
+  const actions = el('span', 'btw-actions');
+  if (b.status === 'done' && b.answer) {
+    const bring = el('button', 'link-btn', '带入对话');
+    bring.type = 'button';
+    bring.dataset.action = 'btw-bring';
+    bring.dataset.id = b.id;
+    bring.title = '把这条问答放进输入框，作为下一条消息的背景';
+    actions.append(bring);
+  }
+  if (!b.id.startsWith('local-')) {
+    const x = iconButton('x', '删除这条旁路问答', 'icon-btn btw-x');
+    x.dataset.action = 'btw-remove';
+    x.dataset.id = b.id;
+    actions.append(x);
+  }
+  head.append(actions);
+  box.append(head, el('div', 'btw-q', b.question));
+  const ans = el('div', 'btw-a');
+  if (b.answer) {
+    const md = el('div', 'md');
+    md.append(renderMarkdown(b.answer, document, { highlight: (code, lang) => highlight(document, code, lang) }));
+    ans.append(md);
+  }
+  if (b.status === 'running') {
+    const wait = el('p', 'btw-wait');
+    wait.append(thinkingDots(), el('span', '', b.answer ? '' : '正在回答…'));
+    ans.append(wait);
+  } else if (b.status === 'error') ans.append(el('p', 'btw-error', `没有回答：${b.error || '未知错误'}`));
+  box.append(ans);
+  return box;
+}
+
+const quoteLines = (text) => text.split('\n').map((l) => (l.trim() ? `> ${l}` : '>')).join('\n');
+
+/** Appends a block (a quote, a side answer) to the composer, after what is already typed. */
+function appendToComposer(block) {
+  const cur = ui.input.value.replace(/\s+$/, '');
+  ui.input.value = `${cur ? `${cur}\n\n` : ''}${block}\n`;
+  autosize();
+  ui.input.focus();
+  const end = ui.input.value.length;
+  ui.input.setSelectionRange(end, end);
+  ui.input.scrollTop = ui.input.scrollHeight;
+  ui.input.dispatchEvent(new Event('input'));
+}
+
+function bringBtw(id) {
+  const b = (state.conv?.btw || []).find((x) => x.id === id);
+  if (!b) return;
+  appendToComposer(`（以下是刚才的一条旁路问答，供参考）\n${quoteLines(`问：${b.question}`)}\n>\n${quoteLines(`答：${b.answer}`)}`);
+}
+
+async function removeBtw(id) {
+  const conv = state.conv;
+  try {
+    await api(`/api/conversations/${conv.id}/btw/${id}`, { method: 'DELETE' });
+  } catch (err) {
+    if (err.status !== 404) { if (err.status !== 401) toast(err.message); return; }
+  }
+  conv.btw = (conv.btw || []).filter((b) => b.id !== id);
+  if (state.conv === conv) render();
+}
+
+/* ---------- quoting a selection ---------- */
+
+const quoteBtn = el('button', 'quote-btn');
+quoteBtn.type = 'button';
+quoteBtn.hidden = true;
+quoteBtn.append(icon('quote', 16), el('span', '', '引用'));
+quoteBtn.setAttribute('aria-label', '引用选中的内容到输入框');
+let pendingQuote = null;
+let quoteHide = null;
+let selecting = false;
+
+/** The selected text in the chat as a Markdown quote (code stays a code block), or null. */
+function selectionQuote() {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  const node = range.commonAncestorContainer;
+  const anc = node.nodeType === 1 ? node : node.parentElement;
+  if (!anc || !ui.messages.contains(anc) || anc.closest('.edit-box, textarea, button')) return null;
+  const raw = sel.toString().replace(/[​‎‏]/g, '');
+  if (!raw.trim()) return null;
+  const pre = anc.closest('pre');
+  let text;
+  if (pre) {
+    const lang = pre.closest('.code-block')?.querySelector('.code-lang')?.textContent || '';
+    const body = raw.replace(/^\n+|\s+$/g, '');
+    const fence = body.includes('```') ? '````' : '```';
+    text = `${fence}${lang && lang !== '代码' ? lang : ''}\n${body}\n${fence}`;
+  } else {
+    text = quoteLines(raw.trim().replace(/\n{3,}/g, '\n\n'));
+  }
+  return { text, rect: range.getBoundingClientRect() };
+}
+
+function placeQuoteBtn() {
+  clearTimeout(quoteHide);
+  const q = selecting ? null : selectionQuote();
+  if (!q) {
+    // A short grace period: on phones tapping the button can clear the selection first.
+    quoteHide = setTimeout(() => { quoteBtn.hidden = true; pendingQuote = null; }, 300);
+    return;
+  }
+  pendingQuote = q.text;
+  quoteBtn.hidden = false;
+  const w = quoteBtn.offsetWidth;
+  const hgt = quoteBtn.offsetHeight;
+  let left;
+  let top;
+  if (coarse.matches) {
+    // Above the composer, away from the system's copy / select-all menu.
+    const r = ui.composer.getBoundingClientRect();
+    left = r.left + (r.width - w) / 2;
+    top = r.top - hgt - 10;
+  } else {
+    const r = q.rect;
+    left = r.left + (r.width - w) / 2;
+    top = r.top - hgt - 8;
+    if (top < 8) top = r.bottom + 8;
+  }
+  quoteBtn.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, left))}px`;
+  quoteBtn.style.top = `${Math.max(8, top)}px`;
 }
 
 async function submitEdit(msg, value) {
@@ -1914,8 +2297,10 @@ $('open-settings').addEventListener('click', () => { if (narrow.matches) setDraw
 $('perm-chip').addEventListener('click', () => openSettings());
 initResizers();
 initFiles({
-  api, toast, openViewer, mdImage: readerImage, closeOthers: () => { closeBrowser({ focus: false }); closeTerminal({ focus: false }); },
+  api, toast, openViewer, mdImage: readerImage, machines, closeOthers: () => { closeBrowser({ focus: false }); closeTerminal({ focus: false }); },
 });
+initMachines({ api, toast, confirm: (title, text) => confirmDialog(title, text, '删除', true) });
+onMachinesChange(() => { if (authed) updateChrome(); });
 initTerminal({ api, toast, claudeCommands, closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); } });
 const PANELS = { files: openFiles, terminal: openTerminal, browser: openBrowser };
 for (const b of document.querySelectorAll('.panel-tab[data-panel]')) b.addEventListener('click', () => PANELS[b.dataset.panel]());
@@ -1977,13 +2362,40 @@ ui.groups.addEventListener('click', (e) => {
   if (btn.dataset.id !== state.conv?.id) openConversation(btn.dataset.id);
 });
 ui.convMenuBtn.addEventListener('click', () => state.conv && convMenu(ui.convMenuBtn, state.conv.id));
+/**
+ * A path a reply names that lives on one of the owner's computers: inside the remote project's
+ * folder, or a Windows path inside a machine's allowed folders. Null otherwise (a host path).
+ */
+function remoteTarget(raw) {
+  let p = String(raw || '').trim().replace(/\\/g, '/');
+  if (/^[A-Za-z]:\//.test(p)) p = `/${p}`;
+  if (!p.startsWith('/')) return null;
+  const win = /^\/[A-Za-z]:/.test(p);
+  const fold = (x) => (/^\/[A-Za-z]:/.test(x) ? x.toLowerCase() : x);
+  const candidates = [];
+  const project = currentProject();
+  if (project?.remote) candidates.push({ machineId: project.remote.machineId, root: project.remote.path, label: project.remote.machine || '' });
+  if (win) for (const m of machines()) for (const r of m.roots) candidates.push({ machineId: m.id, root: r.path, label: m.name });
+  for (const c of candidates) {
+    const root = c.root.replace(/\/$/, '');
+    if (fold(p) === fold(root) || fold(p).startsWith(`${fold(root)}/`)) return { ...c, rel: p.slice(root.length).replace(/^\//, '') };
+  }
+  return null;
+}
+
+function openReplyPath(path) {
+  const t = remoteTarget(path);
+  if (t && t.rel) openRemote(t.machineId, t.root, t.rel, t.label);
+  else openPath(path, state.conv?.id || null);
+}
+
 ui.messages.addEventListener('click', (e) => {
   const modified = e.ctrlKey || e.metaKey || e.shiftKey;
   const pathLink = e.target.closest('.path-link');
   if (pathLink) {
     if (modified && pathLink.href) return;
     e.preventDefault();
-    openPath(pathLink.dataset.path, state.conv?.id || null);
+    openReplyPath(pathLink.dataset.path);
     return;
   }
   const toolOpen = e.target.closest('.tool-open');
@@ -2012,11 +2424,53 @@ ui.messages.addEventListener('click', (e) => {
   else if (action === 'branch') switchBranch(id, Number(btn.dataset.dir));
   else if (action === 'open-browser') openBrowser();
   else if (action === 'refill') setComposer(btn.dataset.text || '');
+  else if (action === 'btw-bring') bringBtw(id);
+  else if (action === 'btw-remove') removeBtw(id);
 });
 ui.messages.addEventListener('keydown', (e) => {
   const pathLink = e.key === 'Enter' && e.target.closest('.path-link');
-  if (pathLink) { e.preventDefault(); openPath(pathLink.dataset.path, state.conv?.id || null); }
+  if (pathLink) { e.preventDefault(); openReplyPath(pathLink.dataset.path); }
 });
+// Quoting: select text in a message, then 引用 adds it to the composer as a Markdown quote.
+document.body.append(quoteBtn);
+quoteBtn.addEventListener('pointerdown', (e) => e.preventDefault());
+quoteBtn.addEventListener('click', () => {
+  if (!pendingQuote) return;
+  appendToComposer(pendingQuote);
+  document.getSelection()?.removeAllRanges();
+  quoteBtn.hidden = true;
+  pendingQuote = null;
+});
+let quoteRaf = null;
+const schedulePlaceQuote = () => {
+  if (quoteRaf) return;
+  quoteRaf = requestAnimationFrame(() => { quoteRaf = null; placeQuoteBtn(); });
+};
+document.addEventListener('selectionchange', schedulePlaceQuote);
+// With a mouse the button appears once the drag ends.
+ui.messages.addEventListener('mousedown', (e) => { if (e.button === 0) { selecting = true; quoteBtn.hidden = true; } });
+document.addEventListener('mouseup', () => { if (selecting) { selecting = false; schedulePlaceQuote(); } });
+ui.scroller.addEventListener('scroll', () => { if (!quoteBtn.hidden) schedulePlaceQuote(); }, { passive: true });
+// 补充 / 提问 while a reply runs.
+ui.askMode.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-mode]');
+  if (!b) return;
+  state.askMode = b.dataset.mode;
+  updateChrome();
+  ui.input.focus();
+});
+ui.askMode.addEventListener('keydown', (e) => {
+  if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  e.preventDefault();
+  state.askMode = state.askMode === 'add' ? 'ask' : 'add';
+  updateChrome();
+  ui.askMode.querySelector(`[data-mode="${state.askMode}"]`)?.focus();
+});
+// Queued messages name the step they wait for and how long it has run: keep that current.
+setInterval(() => {
+  const m = isLive() ? runMessage() : null;
+  if (m?.queued?.length) scheduleMessageRender(m);
+}, 30000);
 // A web image waiting for a tap (外链图片: 点击后显示), in replies and in the reader.
 document.addEventListener('click', (e) => {
   const b = e.target.closest('.md-img-load');
@@ -2042,6 +2496,7 @@ $('image-viewer').addEventListener('keydown', (e) => {
 }
 ui.projChip.addEventListener('click', () => openFiles());
 ui.projectForm.addEventListener('submit', (e) => { e.preventDefault(); createProject(); });
+ui.projectLoc.addEventListener('change', projectLocation);
 $('project-cancel').addEventListener('click', () => ui.projectDialog.close());
 ui.scroller.addEventListener('scroll', () => {
   const d = distanceFromBottom();

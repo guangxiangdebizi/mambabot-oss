@@ -26,6 +26,8 @@ import { TerminalManager } from './terminal.js';
 import { FileAccessError, HostFiles } from './hostfiles.js';
 import { IMAGE_TYPES, PreviewError, buildPreview, previewPart, sendFile, typeOf } from './preview.js';
 import { RemoteError, RemoteImages } from './remote.js';
+import { MachineError, MachineStore, displayPath } from './machines.js';
+import { SideQuestions, progressText } from './sidequestion.js';
 import { imageRefs } from '../public/markdown.js';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
@@ -76,7 +78,7 @@ const SECURITY_HEADERS = {
 
 /** Errors from the file, preview and remote modules carry their own HTTP status. */
 const statusOf = (err) => (err instanceof HttpError || err instanceof FileError || err instanceof FileAccessError
-  || err instanceof PreviewError || err instanceof RemoteError ? err.status : 500);
+  || err instanceof PreviewError || err instanceof RemoteError || err instanceof MachineError ? err.status : 500);
 
 class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -192,6 +194,17 @@ export async function createApp(cfg = loadConfig(), log = console) {
   });
   const projects = new ProjectStore(cfg);
   await projects.load();
+  // The owner's other computers (远程机器), browsed read-only over SFTP; see machines.js.
+  const machines = new MachineStore(cfg, log);
+  await machines.load();
+  // Side questions (/btw) answered by a separate read-only process; see sidequestion.js.
+  const side = new SideQuestions({ cfg, log });
+  side.onUpdate = (conv, entry, done) => {
+    if (!done) return;
+    log.info(`旁路提问结束 conv=${conv.id} btw=${entry.id} status=${entry.status}`);
+    if (store.get(conv.id) === conv) store.saveNow(conv).catch((err) => log.error('保存对话失败', conv.id, err.message));
+  };
+  side.claudeDir = claudeDir;
   // A chat keeps the directory it was created in (Claude sessions are stored per directory).
   const cwdOf = (conv) => conv.cwd || cfg.claudeCwd;
   const terminal = new TerminalManager({ cfg, log });
@@ -328,7 +341,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     return { model, effort };
   }
 
-  async function startTurn(conv, { parentId, userMessage, content, sel, resume }) {
+  async function startTurn(conv, { parentId, userMessage, content, sel, resume, offline = false }) {
     const now = new Date().toISOString();
     const assistantMessage = {
       id: crypto.randomUUID(), role: 'assistant', parentId: userMessage.id, createdAt: now, status: 'running',
@@ -352,9 +365,35 @@ export async function createApp(cfg = loadConfig(), log = console) {
     const project = conv.projectId ? projects.get(conv.projectId) : null;
     const run = runs.start(conv, assistantMessage, content, {
       model: sel.model, effort: sel.effort, resume, runId, extraArgs, permissionMode: prefs.permissionMode,
-      cwd: cwdOf(conv), project: project && { name: project.name },
+      cwd: cwdOf(conv), project: project && { name: project.name, remote: remoteInfo(project, offline) },
     });
     return { assistantMessage, run };
+  }
+
+  /** Where a remote project's files are, for Claude's system prompt (null for a local project). */
+  function remoteInfo(project, offline = false) {
+    if (!project?.remote) return null;
+    const m = machines.get(project.remote.machineId);
+    return {
+      name: m?.name || '远程机器', host: m?.host || '', path: displayPath(project.remote.path),
+      windows: /^\/[A-Za-z]:/.test(project.remote.path), offline, missing: !m,
+    };
+  }
+
+  /**
+   * A message in a remote project when its machine is offline: the owner is asked first
+   * (409 remoteOffline) instead of letting Claude retry a dead connection; `ignoreOffline`
+   * sends anyway and tells Claude the machine was unreachable.
+   */
+  async function remoteGate(project, body) {
+    if (!project?.remote) return false;
+    const m = machines.get(project.remote.machineId);
+    if (!m) return false;
+    let online = true;
+    try { online = (await machines.check(m.id)).online !== false; } catch { online = false; }
+    if (online) return false;
+    if (body.ignoreOffline) return true;
+    throw new HttpError(409, `${m.name} 当前离线，Claude 无法访问项目文件`, { remoteOffline: true, machine: m.name });
   }
 
   function preflight(conv) {
@@ -385,7 +424,14 @@ export async function createApp(cfg = loadConfig(), log = console) {
 
   async function postMessage(req, res, conv) {
     const body = await readBody(req);
-    const { text, files } = await readInput(body);
+    const input = await readInput(body);
+    preflight(conv);
+    const offline = await remoteGate(conv.projectId ? projects.get(conv.projectId) : null, body);
+    return sendJson(res, 201, await beginMessage(conv, body, input, offline));
+  }
+
+  /** Adds the owner's message under `body.parentId` and starts the reply. */
+  async function beginMessage(conv, body, { text, files }, offline = false) {
     preflight(conv);
     const parentId = parentFor(conv, body.parentId);
     const plan = resumePlan(conv, parentId);
@@ -403,9 +449,110 @@ export async function createApp(cfg = loadConfig(), log = console) {
     conv.messages.push(userMessage);
     if (!conv.title) conv.title = makeTitle(text || files[0].name);
     const content = await uploads.buildContent(text, files);
-    const { assistantMessage, run } = await startTurn(conv, { parentId, userMessage, content, sel, resume: plan.resume });
+    const { assistantMessage, run } = await startTurn(conv, { parentId, userMessage, content, sel, resume: plan.resume, offline });
     await store.saveNow(conv);
-    return sendJson(res, 201, { userMessage, assistantMessage, leafId: conv.leafId, run: { id: run.id, seq: run.seq, messageId: assistantMessage.id } });
+    return { userMessage, assistantMessage, leafId: conv.leafId, run: { id: run.id, seq: run.seq, messageId: assistantMessage.id } };
+  }
+
+  /**
+   * A new chat and its first message in one request (one round trip fewer from a phone far
+   * from the server). Everything is checked before the chat exists, so a refused message
+   * leaves no empty chat behind.
+   */
+  async function createConversation(req, res) {
+    const body = await readBody(req);
+    let settings = {};
+    if (body.model) {
+      try { catalog.validate(String(body.model), body.effort ? String(body.effort) : null); } catch (err) { throw new HttpError(400, err.message); }
+      settings = { model: String(body.model), effort: body.effort ? String(body.effort) : null };
+    }
+    let project = null;
+    if (body.projectId) {
+      project = projects.get(String(body.projectId));
+      if (!project) throw new HttpError(400, '项目不存在');
+    }
+    let input = null;
+    let offline = false;
+    if (body.message !== undefined && body.message !== null) {
+      if (typeof body.message !== 'object') throw new HttpError(400, '消息格式错误');
+      input = await readInput(body.message);
+      if (COMPACT_RE.test(input.text)) throw new HttpError(400, '新对话还没有可压缩的上下文');
+      if (runs.activeCount >= maxRuns()) throw new HttpError(429, `同时进行的回复已达上限（${maxRuns()} 个，可在设置里调整），请稍后再试`);
+      selection(body, { settings: {} });
+      offline = await remoteGate(project, body);
+    }
+    const conv = await store.create(settings);
+    if (project) Object.assign(conv, { projectId: project.id, cwd: project.dir });
+    if (!input) {
+      if (project) await store.saveNow(conv);
+      return sendJson(res, 201, { conversation: summary(conv, runs) });
+    }
+    let started;
+    try {
+      started = await beginMessage(conv, { parentId: null, model: body.model, effort: body.effort }, input, offline);
+    } catch (err) {
+      await store.delete(conv.id).catch(() => {});
+      throw err;
+    }
+    return sendJson(res, 201, { conversation: summary(conv, runs), ...started });
+  }
+
+  /**
+   * /btw: a side question answered by a separate read-only process (sidequestion.js), with the
+   * chat up to the last finished reply as context plus the running turn's progress as text.
+   */
+  async function postSideQuestion(req, res, conv) {
+    const body = await readBody(req);
+    const question = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!question) throw new HttpError(400, '问题不能为空');
+    if (question.length > MAX_MESSAGE) throw new HttpError(400, `问题过长（最多 ${MAX_MESSAGE} 字）`);
+    const live = runs.isRunning(conv.id);
+    const byId = new Map(conv.messages.map((m) => [m.id, m]));
+    let anchor;
+    let plan;
+    let progress = '';
+    if (live) {
+      anchor = byId.get(runs.publicState(conv.id).messageId);
+      const userMessage = byId.get(anchor?.parentId);
+      plan = resumePlan(conv, userMessage?.parentId ?? null);
+      progress = progressText(userMessage, anchor);
+    } else {
+      anchor = byId.get(conv.leafId);
+      if (!anchor) throw new HttpError(400, '先发一条消息，再旁路提问');
+      // The newest finished reply on this branch (a user message as leaf means its reply failed to start).
+      let a = anchor;
+      while (a && a.role !== 'assistant') a = byId.get(a.parentId);
+      plan = resumePlan(conv, a ? a.id : null);
+    }
+    if (!plan.ok) throw new HttpError(409, plan.error);
+    let sel;
+    try { sel = selection({}, conv); } catch { sel = { model: conv.settings?.model || prefs.model || 'default', effort: '' }; }
+    // A quick answer: the lowest effort the model offers.
+    const info = catalog.find(sel.model);
+    const effort = info?.efforts?.includes('low') ? 'low' : '';
+    let entry;
+    try {
+      entry = side.ask(conv, {
+        question, anchorId: anchor.id, resume: plan.resume, cwd: cwdOf(conv), model: sel.model, effort, progress,
+      });
+    } catch (err) {
+      throw new HttpError(err.status || 409, err.message);
+    }
+    await store.saveNow(conv);
+    return sendJson(res, 202, { btw: entry });
+  }
+
+  async function sideQuestionApi(req, res, conv, id, method) {
+    const entry = (conv.btw || []).find((b) => b.id === id);
+    if (!entry) throw new HttpError(404, '旁路提问不存在');
+    if (method === 'GET') return sendJson(res, 200, { btw: entry });
+    if (method === 'DELETE') {
+      side.cancel(id);
+      conv.btw = conv.btw.filter((b) => b.id !== id);
+      await store.saveNow(conv);
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(405, '不支持的请求方法');
   }
 
   /** A message sent while a reply runs, added to that reply's turn as in the Claude Code terminal. */
@@ -645,7 +792,16 @@ export async function createApp(cfg = loadConfig(), log = console) {
 
   const projectView = (p) => {
     const convs = store.list().filter((c) => c.projectId === p.id);
-    return { ...p, conversations: convs.length, running: convs.some((c) => runs.isRunning(c.id)) };
+    const view = { ...p, conversations: convs.length, running: convs.some((c) => runs.isRunning(c.id)) };
+    if (p.remote) {
+      const m = machines.get(p.remote.machineId);
+      const mv = m ? machines.view(m) : null;
+      view.remote = {
+        machineId: p.remote.machineId, path: p.remote.path, display: displayPath(p.remote.path),
+        machine: m ? m.name : null, host: m ? m.host : null, online: mv ? mv.online : false,
+      };
+    }
+    return view;
   };
   const projectsPayload = () => ({ projects: projects.list().map(projectView), defaultDir: cfg.claudeCwd });
 
@@ -665,8 +821,17 @@ export async function createApp(cfg = loadConfig(), log = console) {
       if (method === 'POST') {
         const body = await readBody(req);
         return wrap(async () => {
-          const project = await projects.create({ name: body.name, dir: body.dir });
-          log.info(`新建项目 ${project.name} -> ${project.dir}`);
+          let remote = null;
+          if (body.machineId) {
+            // A project on one of the owner's computers: the folder must be inside an allowed
+            // root and reachable now (listing it checks both, canonicalised on the remote side).
+            const m = machines.get(String(body.machineId));
+            if (!m) throw new HttpError(400, '远程机器不存在');
+            const listed = await machines.listDir(m.id, String(body.remoteDir || ''), '');
+            remote = { machineId: m.id, path: listed.root };
+          }
+          const project = await projects.create({ name: body.name, dir: remote ? '' : body.dir, remote });
+          log.info(`新建项目 ${project.name} -> ${project.dir}${remote ? `（远程 ${remote.path}）` : ''}`);
           return sendJson(res, 201, { project: projectView(project), ...projectsPayload() });
         });
       }
@@ -698,6 +863,46 @@ export async function createApp(cfg = loadConfig(), log = console) {
       const file = await projects.raw(key, rel);
       return sendFile(req, res, { ...file, download: url.searchParams.get('download') === '1', html: url.searchParams.get('render') === 'html' });
     });
+  }
+
+  /**
+   * Remote machines: configuration (owner only, behind the login like everything here) and
+   * read-only browsing of their allowed folders over SFTP.
+   */
+  async function machinesApi(req, res, url, method) {
+    const path = url.pathname;
+    const payload = async () => ({ machines: machines.list(), sshHosts: await machines.hosts() });
+    if (path === '/api/machines') {
+      if (method === 'GET') return sendJson(res, 200, await payload());
+      if (method === 'POST') {
+        const m = await machines.create(await readBody(req));
+        log.info(`添加远程机器 ${m.name} (${m.host})`);
+        return sendJson(res, 201, { machine: machines.view(m), ...(await payload()) });
+      }
+      throw new HttpError(405, '不支持的请求方法');
+    }
+    const mm = path.match(/^\/api\/machines\/([^/]+)(?:\/(status|tree|file|raw|part))?$/);
+    if (!mm || !ID_RE.test(mm[1])) throw new HttpError(404, '接口不存在');
+    const [, id, action] = mm;
+    if (!action && method === 'PATCH') {
+      await machines.update(id, await readBody(req));
+      return sendJson(res, 200, await payload());
+    }
+    if (!action && method === 'DELETE') {
+      const using = projects.list().filter((p) => p.remote?.machineId === id);
+      if (using.length) throw new HttpError(409, `项目「${using.map((p) => p.name).join('、')}」在使用这台机器，请先删除这些项目`);
+      if (!(await machines.remove(id))) throw new HttpError(404, '远程机器不存在');
+      return sendJson(res, 200, await payload());
+    }
+    if ((method !== 'GET' && method !== 'HEAD') || !action) throw new HttpError(405, '不支持的请求方法');
+    if (action === 'status') return sendJson(res, 200, { machine: await machines.check(id, { force: url.searchParams.get('force') === '1' }) });
+    const root = url.searchParams.get('root') || '';
+    const rel = url.searchParams.get('path') || '';
+    if (action === 'tree') return sendJson(res, 200, await machines.listDir(id, root, rel));
+    if (action === 'file') return sendJson(res, 200, { file: await machines.preview(id, root, rel, { sheet: Number(url.searchParams.get('sheet')) || 0 }) });
+    if (action === 'part') return sendPart(res, await machines.part(id, root, rel, url.searchParams.get('entry') || ''));
+    const file = await machines.raw(id, root, rel);
+    return sendFile(req, res, { ...file, download: url.searchParams.get('download') === '1', html: url.searchParams.get('render') === 'html' });
   }
 
   /**
@@ -897,25 +1102,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     }
     if (path === '/api/conversations') {
       if (method === 'GET') return listConversations(res, url);
-      if (method === 'POST') {
-        const body = await readBody(req);
-        let settings = {};
-        if (body.model) {
-          try { catalog.validate(String(body.model), body.effort ? String(body.effort) : null); } catch (err) { throw new HttpError(400, err.message); }
-          settings = { model: String(body.model), effort: body.effort ? String(body.effort) : null };
-        }
-        let project = null;
-        if (body.projectId) {
-          project = projects.get(String(body.projectId));
-          if (!project) throw new HttpError(400, '项目不存在');
-        }
-        const conv = await store.create(settings);
-        if (project) {
-          Object.assign(conv, { projectId: project.id, cwd: project.dir });
-          await store.saveNow(conv);
-        }
-        return sendJson(res, 201, { conversation: summary(conv, runs) });
-      }
+      if (method === 'POST') return createConversation(req, res);
     }
     if (path === '/api/models' && method === 'GET') return sendJson(res, 200, { ...catalog.publicList(), prefs });
     if (path === '/api/models/refresh' && method === 'POST') {
@@ -983,6 +1170,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     }
     if (path.startsWith('/api/tasks')) return tasksApi(req, res, path, method);
     if (path === '/api/projects' || path.startsWith('/api/projects/')) return projectsApi(req, res, url, method);
+    if (path === '/api/machines' || path.startsWith('/api/machines/')) return machinesApi(req, res, url, method);
     if (path.startsWith('/api/terminal/')) return terminalApi(req, res, path, method);
     if (path.startsWith('/api/browser')) return browserApi(req, res, path, method);
     if (path === '/api/uploads' && method === 'POST') return upload(req, res);
@@ -999,7 +1187,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
       return sendJson(res, 200, { shares: shares.list() });
     }
 
-    const m = path.match(/^\/api\/conversations\/([^/]+)(?:\/(messages|followups|regenerate|stop|events|approvals|share|status)(?:\/([^/]+))?)?$/);
+    const m = path.match(/^\/api\/conversations\/([^/]+)(?:\/(messages|followups|regenerate|stop|events|approvals|share|status|btw)(?:\/([^/]+))?)?$/);
     if (!m || !ID_RE.test(m[1])) throw new HttpError(404, '接口不存在');
     const conv = store.get(m[1]);
     if (!conv) throw new HttpError(404, '对话不存在');
@@ -1007,7 +1195,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
 
     if (!action && method === 'GET') {
       return sendJson(res, 200, {
-        conversation: { ...summary(conv, runs), messages: conv.messages, leafId: conv.leafId, run: runs.publicState(conv.id) },
+        conversation: { ...summary(conv, runs), messages: conv.messages, leafId: conv.leafId, run: runs.publicState(conv.id), btw: conv.btw || [] },
       });
     }
     if (!action && method === 'PATCH') return patchConversation(req, res, conv);
@@ -1015,6 +1203,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     if (action === 'status' && method === 'GET') return conversationStatus(res, conv);
     if (!action && method === 'DELETE') {
       if (runs.isRunning(conv.id)) throw new HttpError(409, '请先停止正在进行的回复');
+      for (const b of conv.btw || []) side.cancel(b.id);
       await shares.removeForConv(conv.id);
       await store.delete(conv.id);
       return sendJson(res, 200, { ok: true });
@@ -1036,6 +1225,8 @@ export async function createApp(cfg = loadConfig(), log = console) {
     }
     if (action === 'messages' && method === 'POST') return postMessage(req, res, conv);
     if (action === 'followups' && method === 'POST') return postFollowup(req, res, conv);
+    if (action === 'btw' && !sub && method === 'POST') return postSideQuestion(req, res, conv);
+    if (action === 'btw' && sub) return sideQuestionApi(req, res, conv, sub, method);
     if (action === 'events' && method === 'GET') return streamEvents(req, res, conv, url);
     if (action === 'stop' && method === 'POST') {
       if (!runs.stop(conv.id)) throw new HttpError(409, '没有正在进行的回复');
@@ -1215,6 +1406,8 @@ export async function createApp(cfg = loadConfig(), log = console) {
     uploads,
     remoteImages,
     hostFiles,
+    machines,
+    side,
     browser,
     runs,
     store,
@@ -1224,6 +1417,7 @@ export async function createApp(cfg = loadConfig(), log = console) {
     async close() {
       scheduler.stop();
       terminal.shutdown();
+      side.shutdown();
       server.close();
       await runs.shutdown();
       server.closeAllConnections();

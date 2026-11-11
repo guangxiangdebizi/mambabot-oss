@@ -96,13 +96,17 @@
             <input id="file-input" type="file" multiple hidden>
             <span id="composer-model" class="composer-model" aria-live="polite"></span>
             <button id="perm-chip" type="button" class="perm-chip" hidden></button>
+            <div id="ask-mode" class="ask-mode" role="radiogroup" aria-label="回复进行中发送的消息" hidden>
+              <button type="button" role="radio" data-mode="add" aria-checked="true" title="补充要求：Claude 完成当前步骤后看到，进入主任务">补充</button>
+              <button type="button" role="radio" data-mode="ask" aria-checked="false" title="提问：旁路马上回答，不打断主任务，也不进入上下文（同 /btw）">提问</button>
+            </div>
             <div class="composer-spacer"></div>
             <button id="send" type="submit" class="send-btn" aria-label="发送" data-icon="arrow-up" disabled></button>
             <button id="stop" type="button" class="send-btn stop" aria-label="停止生成" data-icon="stop" hidden></button>
           </div>
         </form>
         <p id="composer-error" class="composer-error" role="alert" hidden></p>
-        <p class="composer-hint">Enter 发送，Shift + Enter 换行。回复可能有误，请核对重要信息。</p>
+        <p class="composer-hint">Enter 发送，Shift + Enter 换行；/btw 旁路提问，选中回复里的文字可以引用。回复可能有误，请核对重要信息。</p>
       </div>
     </section>
 
@@ -161,17 +165,19 @@
       </div>
       <div class="fp-root">
         <span data-icon="folder" aria-hidden="true"></span>
-        <span class="fp-root-text"><span id="fp-root-name" class="fp-root-name"></span><span id="fp-root-dir" class="fp-root-dir"></span></span>
+        <span class="fp-root-text"><span id="fp-root-name" class="fp-root-name"></span><label for="fp-src" class="sr-only">文件来源</label><select id="fp-src" class="fp-src" hidden></select><span id="fp-root-dir" class="fp-root-dir"></span></span>
       </div>
       <div id="fp-tree" class="fp-tree" role="tree" aria-labelledby="fp-heading"></div>
       <div id="fp-view" class="fp-view" hidden>
         <div class="fp-view-bar">
           <button id="fp-up" type="button" class="icon-btn" aria-label="返回目录" title="返回目录" data-icon="back"></button>
           <span id="fp-path" class="fp-path"></span>
+          <button id="fp-toc" type="button" class="btn btn-ghost btn-sm" aria-expanded="false" aria-controls="fp-toc-list" hidden>目录</button>
           <button id="fp-source" type="button" class="btn btn-ghost btn-sm" hidden>源码</button>
           <button id="fp-wide" type="button" class="icon-btn fp-wide-btn" aria-pressed="false" aria-label="全屏阅读" title="全屏阅读"></button>
           <a id="fp-download" class="icon-btn" aria-label="下载" title="下载" data-icon="download"></a>
         </div>
+        <nav id="fp-toc-list" class="fp-toc" aria-label="文档目录" hidden></nav>
         <div id="fp-body" class="fp-body"></div>
       </div>
     </aside>
@@ -245,8 +251,15 @@
       <h2 class="dialog-title">新建项目</h2>
       <label for="project-name" class="field-label">名称</label>
       <input id="project-name" maxlength="60" required autocomplete="off">
-      <label for="project-dir" class="field-label">目录（可选）</label>
-      <input id="project-dir" autocomplete="off" spellcheck="false" placeholder="留空则新建文件夹">
+      <div id="project-where" hidden>
+        <label for="project-loc" class="field-label">位置</label>
+        <select id="project-loc" class="project-loc"></select>
+      </div>
+      <div id="project-local">
+        <label for="project-dir" class="field-label">目录（可选）</label>
+        <input id="project-dir" autocomplete="off" spellcheck="false" placeholder="留空则新建文件夹">
+      </div>
+      <div id="project-remote" class="project-remote" hidden></div>
       <p id="project-hint" class="dialog-text"></p>
       <p id="project-error" class="form-error" role="alert" hidden></p>
       <div class="dialog-actions">

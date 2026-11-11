@@ -72,6 +72,49 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   NUL-sniffed for binaries), `raw` serves images inline (SVG under a sandbox CSP) and
   everything else as a download (now via the reader, below). The panel reloads after a reply's
   file-changing tool calls and at the end of a run.
+- **Remote machines** (`src/machines.js`, `public/machines.js`, `machines.json` in the data dir):
+  the owner's own computers, each an SSH alias that must appear as a non-wildcard `Host` in the
+  server's `~/.ssh/config`, plus allowed folders (absolute; Windows drives as `/D:/…`; never a
+  whole drive, never under `AppData`, `.ssh` and the like). Browsing runs the system `sftp -b -`
+  (BatchMode, ConnectTimeout 8 s, `ControlMaster=auto` with sockets in `<data>/ssh-ctl`,
+  `LC_ALL=C.UTF-8`; `\ooo` escapes in names are decoded anyway). Every request canonicalises the
+  allowed root, the browse root (an allowed root or a folder inside one) and the target on the
+  remote side with `cd` + `pwd`, and refuses anything that does not stay inside (`..`, symlinked
+  folders); `ls -lna` lines are parsed by their date column (owner/group may contain spaces).
+  Symlinks are not listed, secret names are hidden as on this host plus `AppData`, `NTUSER.DAT*`,
+  `*.ppk`, `*.ovpn`, `*.rdp`. Files are checked in the parent's listing (regular file, size ≤
+  `AW_REMOTE_MAX_MB`, default 20) and copied with `get` into `<data>/machine-cache` (keyed by
+  host, path, size and date; LRU, 300 MB), then served by the same reader code as host files.
+  Listings are cached 10 s, online state 30 s; a connection failure (exit 255, ssh errors,
+  timeout) is a 503 with `offline: true`, shown as 离线 in the panel, settings and sidebar.
+  `GET /api/machines/<id>/{status,tree,file,raw,part}?root=&path=`; configuration via
+  `/api/machines` (POST/PATCH/DELETE). Read-only: there is no write, rename or delete endpoint.
+- **Remote projects**: `POST /api/projects` with `machineId` and `remoteDir` (checked by listing
+  it) stores `project.remote = { machineId, path }` and still creates `<claude cwd>/projects/<name>`
+  as the chats' working directory (CLAUDE.md, memory). The handoff names the machine, the path,
+  the SSH alias and, for `D:`-style paths, that the shell is PowerShell/cmd. Sending in a remote
+  project checks the machine first; offline gives 409 `remoteOffline`, the page asks, and
+  `ignoreOffline` sends anyway with a note telling Claude not to keep retrying. The file panel
+  opens the remote folder by default and has a source picker (云机 / each allowed folder); reply
+  paths inside the project's remote folder, and `D:\…` paths inside any allowed folder, open there.
+- **Sending**: the page shows the owner's message at once (发送中) and clears the composer; a
+  failed request removes it and puts the text and attachments back. A new chat sends
+  `POST /api/conversations` with `message: { text, attachments }`, which validates everything
+  (text, model, concurrency, remote machine) before the chat exists and starts the reply in the
+  same request. Queued follow-ups name the step they wait for (the running tool and its age).
+- **Side questions** (`/btw`, `src/sidequestion.js`): while a reply runs the composer has a
+  补充 / 提问 toggle; 提问 or `/btw <question>` posts `POST /api/conversations/<id>/btw`. A separate
+  `claude -p` resumes the chat as a throwaway fork of the last finished reply (`--fork-session
+  --no-session-persistence`, nothing is written), with `--tools Read,Grep,Glob --permission-mode
+  dontAsk --strict-mcp-config` (read-only, no MCP servers, any permission prompt denied), the
+  lowest effort the model offers, and the running turn's progress (owner message, Claude's text,
+  steps with the one in progress and its age, follow-ups) appended to the system prompt. One per
+  chat, two at a time, 3-minute limit. The answer is stored in `conv.btw` (never a message, so
+  never in the main session or shares) and polled by the page (`GET …/btw/<id>`, text grows as it
+  streams); 带入对话 pastes the question and answer into the composer as a quote; `DELETE` removes one.
+- **Quoting**: selecting text in a message shows 引用 (by the selection with a mouse, above the
+  composer on touch screens); it appends the selection to the composer as `> ` lines, or as a
+  fenced block when it lies in a code block. Front end only.
 - **Reader** (`src/preview.js`, `src/office.js`, `src/zip.js`, `src/xml.js`, `public/reader.js`,
   `public/pdfview.js`): one viewer for three sources, each with the same three endpoints:
   project files (`/api/projects/<id|default>/{file,raw,part}?path=`), any host path a reply names
@@ -194,6 +237,10 @@ Web sessions run from their own directory (`AW_CLAUDE_CWD`, default `~/assistant
 - Reading files: the web login can already run commands (terminal panel), so the reader adds no
   power, but credential locations are refused everywhere (tree, reader, reply images,
   `show_file`) so they never end up on a page by accident or by a model-chosen path.
+- Remote machines add no new power either (the login can already run `ssh`), but the file
+  panel only reads, only inside the allowed folders as canonicalised by the remote side, never
+  through symlinks or into credential locations, and only aliases already in `~/.ssh/config` can
+  be added; no password or key is stored or created by the app. Side questions run read-only.
 - Web images are fetched by the server from public addresses only (see above), so a reply
   cannot make the server reach localhost, the LAN or the cloud metadata service. A
   prompt-injected reply could still put data into an image URL; 外链图片 → 点击后显示 makes

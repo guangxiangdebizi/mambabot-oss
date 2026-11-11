@@ -155,6 +155,19 @@ async function onUser(content) {
     result(s);
     return;
   }
+  if (text.includes('handoff?')) {
+    const s = `system=${flag('--append-system-prompt') || ''}`;
+    streamText('msg_h', [s]);
+    result(s);
+    return;
+  }
+  if (text.includes('btw?')) {
+    // A side question: report how it was started (read-only, throwaway fork, progress as text).
+    const s = `tools=${flag('--tools')} mode=${flag('--permission-mode')} strict=${has('--strict-mcp-config')} persist=${!has('--no-session-persistence')} resume=${flag('--resume') || ''} fork=${has('--fork-session')} effort=${flag('--effort') || ''} progress=${(flag('--append-system-prompt') || '').includes('主任务当前这一轮')}`;
+    streamText('msg_q', [s.slice(0, 20), s.slice(20)]);
+    result(s);
+    return;
+  }
   if (text.includes('whoami?')) {
     const s = `config=${process.env.CLAUDE_CONFIG_DIR || '-'}`;
     streamText('msg_w', [s]);

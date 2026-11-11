@@ -64,6 +64,9 @@ export function loadConfig(overrides = {}) {
     // Web images in replies are fetched only from public addresses. A host whose DNS answers
     // with a local proxy's "fake IPs" (TUN/fake-ip mode, 198.18.0.0/15) sets this to 1.
     remoteFakeIp: env.AW_REMOTE_IMAGES_FAKE_IP === '1',
+    // Remote machines (远程机器): largest file copied over SFTP for the reader, in MB. Files go
+    // through the owner's tunnel, which a big transfer can clog.
+    remoteMaxBytes: Math.max(1, Number(env.AW_REMOTE_MAX_MB) || 20) * 1024 * 1024,
     ...overrides,
   };
 }

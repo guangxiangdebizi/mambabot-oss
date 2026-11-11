@@ -1,13 +1,19 @@
 // File panel: the current project's directory tree (read-only) and the reader, which opens
 // project files, any host file a reply names, and attachments (see reader.js for the kinds).
+// The tree can also show a folder on one of the owner's computers (远程机器, over SFTP): the
+// source picker at the top switches between this server and the machines' allowed folders, and
+// a project that lives on a machine opens its remote folder by default.
 import { icon } from './icons.js';
-import { fmtSize, hasSourceToggle, hostSource, projectSource, renderPreview, uploadSource } from './reader.js';
+import {
+  fmtSize, hasSourceToggle, hostSource, projectSource, remoteSource, renderPreview, uploadSource,
+} from './reader.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
   panel: $('files-panel'), chip: $('files-btn'), back: $('fp-back'), close: $('fp-close'), refresh: $('fp-refresh'),
   rootName: $('fp-root-name'), rootDir: $('fp-root-dir'), tree: $('fp-tree'), view: $('fp-view'), up: $('fp-up'),
   path: $('fp-path'), source: $('fp-source'), download: $('fp-download'), body: $('fp-body'), wide: $('fp-wide'),
+  src: $('fp-src'), toc: $('fp-toc'), tocList: $('fp-toc-list'),
 };
 const narrow = window.matchMedia('(max-width: 767px)');
 
@@ -16,7 +22,14 @@ const st = {
   key: null, // project id or 'default'
   name: '',
   dir: '',
-  dirs: new Map(), // relative dir -> { entries, truncated } | { error }
+  // A folder on a remote machine shown instead of the project's directory on this server:
+  // { machineId, root (remote path), label (machine name), display }. `projectRemote` is the
+  // current project's own remote folder (the default when the project lives on a machine).
+  remote: null,
+  projectRemote: null,
+  projectRemoteKey: '',
+  srcSig: '',
+  dirs: new Map(), // relative dir -> { entries, truncated } | { error, offline }
   open: new Set(['']), // expanded dirs
   // The reader: where the open file comes from, its reader data, options (sheet), viewer handle.
   view: null, // { src, file, params, error, loading, showSource, handle }
@@ -34,18 +47,61 @@ const q = (path) => `?path=${encodeURIComponent(path)}`;
 
 export function isFilesOpen() { return !ui.panel.hidden; }
 
-/** Which directory the panel shows: follows the chat (its project, or the default one). */
-export function setFilesRoot(key, name) {
-  if (key === st.key) { st.name = name; renderRoot(); return; }
-  Object.assign(st, { key, name, dir: '' });
-  st.dirs.clear();
-  st.open = new Set(['']);
-  st.seq += 1;
-  // A project file belongs to the old root; files from replies and attachments stay open.
-  if (st.view?.src.type === 'project') closeView();
+/**
+ * Which directory the panel shows: follows the chat (its project, or the default one). A
+ * project on a remote machine passes its folder there as `projectRemote`.
+ */
+export function setFilesRoot(key, name, projectRemote = null) {
+  const prKey = projectRemote ? `${projectRemote.machineId}|${projectRemote.root}` : '';
+  if (key === st.key && prKey === st.projectRemoteKey) {
+    if (projectRemote) st.projectRemote = projectRemote;
+    st.name = name;
+    renderRoot();
+    return;
+  }
+  Object.assign(st, { key, name, projectRemote, projectRemoteKey: prKey, remote: projectRemote });
+  resetTree();
   if (isFilesOpen()) load();
   renderRoot();
 }
+
+function resetTree() {
+  st.dir = '';
+  st.dirs.clear();
+  st.open = new Set(['']);
+  st.seq += 1;
+  // A file from the tree belongs to the old root; files from replies and attachments stay open.
+  if (st.view && (st.view.src.type === 'project' || st.view.src.type === 'remote')) closeView();
+}
+
+/** Switches the tree between this server and a remote folder (value of the source picker). */
+function setSource(value) {
+  if (value === 'cloud') st.remote = null;
+  else if (value === 'project') st.remote = st.projectRemote;
+  else {
+    const [, id, ...rest] = value.split(':');
+    const root = rest.join(':');
+    const m = (hooks.machines?.() || []).find((x) => x.id === id);
+    if (!m) return;
+    st.remote = { machineId: id, root, label: m.name, display: m.roots.find((r) => r.path === root)?.display || root };
+  }
+  resetTree();
+  load();
+  renderRoot();
+}
+
+/** Opens a file on a remote machine (a path a reply names in a remote project). */
+export async function openRemote(machineId, root, path, label = '') {
+  await openSource(remoteSource(machineId, root, path, label));
+}
+
+const treeUrl = (path) => (st.remote
+  ? `/api/machines/${encodeURIComponent(st.remote.machineId)}/tree?root=${encodeURIComponent(st.remote.root)}&path=${encodeURIComponent(path)}`
+  : `${base()}/tree${q(path)}`);
+const treeSource = (path) => (st.remote ? remoteSource(st.remote.machineId, st.remote.root, path, st.remote.label) : projectSource(st.key, path));
+const fromTree = (src) => (st.remote
+  ? src.type === 'remote' && src.machineId === st.remote.machineId && src.root === st.remote.root
+  : src.type === 'project');
 
 export function openFiles() {
   hooks.closeOthers?.();
@@ -68,13 +124,13 @@ export function closeFiles({ focus = true } = {}) {
 async function fetchDir(path) {
   const seq = st.seq;
   try {
-    const data = await hooks.api(`${base()}/tree${q(path)}`);
+    const data = await hooks.api(treeUrl(path));
     if (seq !== st.seq) return;
-    st.dir = data.root;
+    st.dir = st.remote ? data.rootDisplay : data.root;
     st.dirs.set(path, { entries: data.entries, truncated: data.truncated });
   } catch (err) {
     if (seq !== st.seq || err.status === 401) return;
-    st.dirs.set(path, { error: err.message });
+    st.dirs.set(path, { error: err.message, offline: Boolean(err.data?.offline) });
     if (err.status === 404 || err.status === 403) st.open.delete(path);
   }
 }
@@ -151,7 +207,7 @@ async function loadView(src, { quiet = false, keepScroll = false, params } = {})
   }
   if (st.view !== view) return;
   view.loading = false;
-  if (file.kind === 'dir' && src.type === 'project') {
+  if (file.kind === 'dir' && fromTree(src)) {
     // Expand the folder and every parent in the tree.
     const parts = file.path ? file.path.split('/') : [];
     for (let i = 0; i <= parts.length; i += 1) st.open.add(parts.slice(0, i).join('/'));
@@ -177,6 +233,27 @@ async function loadView(src, { quiet = false, keepScroll = false, params } = {})
 // Long paths are cut at the start (direction: rtl in CSS); the LRMs keep their slashes in place.
 function renderRoot() {
   ui.rootName.textContent = st.name || '默认工作目录';
+  const ms = hooks.machines?.() || [];
+  const picker = ms.length > 0 || Boolean(st.projectRemote);
+  ui.src.hidden = !picker;
+  ui.rootName.hidden = picker;
+  if (picker) {
+    const opts = [['cloud', `云机 · ${st.projectRemote ? '项目工作目录' : (st.name || '默认工作目录')}`]];
+    if (st.projectRemote) opts.push(['project', `${st.projectRemote.label} · ${st.projectRemote.display}（项目目录）`]);
+    for (const m of ms) {
+      for (const r of m.roots) opts.push([`m:${m.id}:${r.path}`, `${m.name} · ${r.display}${m.online === false ? '（离线）' : ''}`]);
+    }
+    let value = 'cloud';
+    if (st.remote) value = st.remote === st.projectRemote ? 'project' : `m:${st.remote.machineId}:${st.remote.root}`;
+    if (!opts.some(([v]) => v === value)) opts.push([value, `${st.remote.label} · ${st.remote.display}`]);
+    const sig = JSON.stringify(opts);
+    // Rebuilt only when the choices change, so an open picker on a phone is not reset.
+    if (sig !== st.srcSig) {
+      st.srcSig = sig;
+      ui.src.replaceChildren(...opts.map(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; return o; }));
+    }
+    ui.src.value = value;
+  }
   ui.rootDir.textContent = st.dir ? `‎${st.dir}‎` : '';
   ui.rootDir.title = st.dir;
   const label = st.key && st.key !== 'default' ? `文件：${st.name}` : '文件';
@@ -188,9 +265,13 @@ function renderTree() {
   const top = st.dirs.get('');
   ui.tree.replaceChildren();
   if (!top) { ui.tree.append(el('p', 'fp-note', '加载中…')); return; }
-  if (top.error) { ui.tree.append(el('p', 'fp-note', top.error)); return; }
+  if (top.error) {
+    ui.tree.append(el('p', 'fp-note', top.error));
+    if (top.offline) ui.tree.append(el('p', 'fp-note', '电脑开机、联网并登录后，点右上角的刷新再试。'));
+    return;
+  }
   if (!top.entries.length) {
-    ui.tree.append(el('p', 'fp-note', '目录是空的。让 Claude 在这个项目里写的文档和代码会出现在这里。'));
+    ui.tree.append(el('p', 'fp-note', st.remote ? '目录是空的。' : '目录是空的。让 Claude 在这个项目里写的文档和代码会出现在这里。'));
     return;
   }
   ui.tree.append(branch('', 0));
@@ -207,7 +288,7 @@ function branch(path, depth) {
   ul.setAttribute('role', depth ? 'group' : 'presentation');
   if (!data) { ul.append(el('li', 'fp-note', '加载中…')); return ul; }
   if (data.error) { ul.append(el('li', 'fp-note', data.error)); return ul; }
-  const current = st.view?.src.type === 'project' ? st.view.src.path : null;
+  const current = st.view && fromTree(st.view.src) ? st.view.src.path : null;
   for (const e of data.entries) {
     const rel = path ? `${path}/${e.name}` : e.name;
     const li = el('li');
@@ -238,6 +319,7 @@ function branch(path, depth) {
 
 function displayPath(v) {
   if (v.src.type === 'upload') return v.file?.name || v.src.name || '附件';
+  if (v.src.type === 'remote') return `${v.src.label ? `${v.src.label}：` : ''}${v.file?.remote || v.src.path}`;
   const p = v.file?.path || v.src.path || '';
   // A host file inside the panel's root reads better relative to it.
   if (v.src.type === 'host' && st.dir && p.startsWith(`${st.dir}/`)) return p.slice(st.dir.length + 1);
@@ -249,10 +331,12 @@ function renderView() {
   ui.tree.hidden = Boolean(v);
   ui.view.hidden = !v;
   renderTree();
+  setToc(false);
+  ui.toc.hidden = true;
   if (!v) return;
   const shown = displayPath(v);
   ui.path.textContent = `‎${shown}‎`;
-  ui.path.title = v.src.type === 'upload' ? `附件：${shown}` : (v.file?.path || v.src.path || '');
+  ui.path.title = v.src.type === 'upload' ? `附件：${shown}` : (v.src.type === 'remote' ? shown : (v.file?.path || v.src.path || ''));
   ui.download.href = v.src.raw({ download: 1 });
   ui.source.hidden = !hasSourceToggle(v.file);
   ui.source.textContent = v.showSource ? '预览' : '源码';
@@ -266,6 +350,38 @@ function renderView() {
     openSource: (src) => loadView(src),
     mdImage: hooks.mdImage,
   });
+  buildToc();
+}
+
+/* ---------- outline (Markdown and Word headings) ---------- */
+
+function headings() {
+  return [...ui.body.querySelectorAll('.fp-md h1, .fp-md h2, .fp-md h3, .fp-md h4, .fp-md h5, .fp-md h6, .doc .doc-h')]
+    .filter((h) => !h.closest('table') && h.textContent.trim());
+}
+
+function buildToc() {
+  const heads = headings();
+  ui.toc.hidden = heads.length < 2;
+  ui.tocList.replaceChildren();
+  if (heads.length < 2) return;
+  const top = Math.min(...heads.map((h) => Number(h.tagName[1])));
+  const ul = el('ul', 'fp-toc-items');
+  heads.forEach((h, i) => {
+    const li = el('li');
+    const b = el('button', 'fp-toc-item', h.textContent.trim());
+    b.type = 'button';
+    b.dataset.index = String(i);
+    b.style.paddingLeft = `${10 + (Number(h.tagName[1]) - top) * 14}px`;
+    li.append(b);
+    ul.append(li);
+  });
+  ui.tocList.append(ul);
+}
+
+function setToc(open) {
+  ui.tocList.hidden = !open;
+  ui.toc.setAttribute('aria-expanded', String(open));
 }
 
 function setWide(on) {
@@ -310,8 +426,20 @@ export function initFiles(h) {
       }
       ui.tree.querySelector(`.fp-item[data-path="${CSS.escape(path)}"]`)?.focus();
     } else {
-      loadView(projectSource(st.key, path));
+      loadView(treeSource(path));
     }
+  });
+  ui.src.addEventListener('change', () => setSource(ui.src.value));
+  ui.toc.addEventListener('click', () => setToc(ui.tocList.hidden));
+  ui.tocList.addEventListener('click', (e) => {
+    const b = e.target.closest('.fp-toc-item');
+    if (!b) return;
+    const h = headings()[Number(b.dataset.index)];
+    setToc(false);
+    if (!h) return;
+    ui.body.scrollTop += h.getBoundingClientRect().top - ui.body.getBoundingClientRect().top - 8;
+    h.tabIndex = -1;
+    h.focus({ preventScroll: true });
   });
   // Images (files, Markdown, documents, slides) open in the shared viewer, as in replies.
   ui.body.addEventListener('click', (e) => {

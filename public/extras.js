@@ -1,6 +1,7 @@
 // Settings (account + plan usage), scheduled tasks, the "/" command palette and the "+" menu.
 // Everything shown here comes from the backend; nothing is invented client-side.
 import { icon } from './icons.js';
+import { machinesSection } from './machines.js';
 
 let h = null; // hooks from app.js
 const $ = (id) => document.getElementById(id);
@@ -70,9 +71,12 @@ const limitLabel = (l) => LIMIT_LABEL[l.kind] || (l.group === 'weekly' ? `每周
 
 const settings = { data: null, error: '', loading: false };
 
+// Built once per opening, so a half-filled machine form survives the re-renders below.
+let machinesSec = null;
+
 export function openSettings() {
   const dlg = $('settings-dialog');
-  if (!dlg.open) dlg.showModal();
+  if (!dlg.open) { dlg.showModal(); machinesSec = null; }
   renderSettings();
   loadAccount(false);
 }
@@ -143,6 +147,8 @@ function renderSettings() {
   body.append(usage);
 
   body.append(permissionSection(), remoteImagesSection(), runSection(), notifySection());
+  machinesSec ||= machinesSection(section);
+  body.append(machinesSec);
 
   // Own request and fixed slot: switching must still work when this account's CLI cannot answer.
   const switchSlot = el('div');
@@ -1050,6 +1056,7 @@ const WEB_COMMANDS = [
   { name: 'clear', description: '开始新对话（网页端每个对话的上下文相互独立）', run: () => h.newChat() },
   { name: 'model', description: '选择模型和推理强度', run: () => h.openModelPop() },
   { name: 'effort', description: '调整推理强度', run: () => h.openModelPop() },
+  { name: 'btw', argumentHint: '<问题>', description: '旁路提问：马上回答，不打断正在进行的任务，也不进入对话上下文', run: () => h.setComposer('/btw ') },
   { name: 'compact', description: '压缩当前对话的上下文（总结较早的内容，释放空间）', run: () => h.sendCommand('/compact') },
   { name: 'status', description: '查看上下文占用、最大上下文和本对话花费', run: () => openStatus() },
   { name: 'context', description: '同 /status：上下文占用明细', run: () => openStatus() },

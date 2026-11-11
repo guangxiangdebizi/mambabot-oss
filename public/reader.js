@@ -41,6 +41,22 @@ export function hostSource(path, conv = null) {
   };
 }
 
+/**
+ * A file on one of the owner's computers (远程机器): `root` is the folder the panel browses (an
+ * allowed root, or a remote project's folder), `path` relative to it; `label` names the machine.
+ */
+export function remoteSource(machineId, root, path, label = '') {
+  const base = `/api/machines/${encodeURIComponent(machineId)}`;
+  return {
+    type: 'remote', machineId, root, path, label, id: `r:${machineId}:${root}:${path}`,
+    preview: (o = {}) => `${base}/file?${q({ root, path, ...o })}`,
+    raw: (o = {}) => `${base}/raw?${q({ root, path, ...o })}`,
+    part: (entry) => `${base}/part?${q({ root, path, entry })}`,
+    // Links inside a remote document stay on that machine and inside the same folder.
+    resolve: (rel) => (/^(\/|~\/|file:|[A-Za-z]:)/.test(rel) ? null : remoteSource(machineId, root, joinPath(dirOf(path), rel).replace(/^(\.\.\/)+/, ''), label)),
+  };
+}
+
 export function uploadSource(id, name = '') {
   const base = `/api/uploads/${encodeURIComponent(id)}`;
   return {

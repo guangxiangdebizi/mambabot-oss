@@ -44,6 +44,9 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 - **模型与推理强度**：可选的模型直接来自 CLI 的 `initialize`（Opus、Sonnet、Haiku……），每个对话可以单独选模型和推理强度。如果运行时实际用的模型和你选的不一样，页面会明确提示。
 - **分支**：编辑任何一条消息、重新生成任何一条回复，都会从当时的上下文分叉成新分支（`‹ 1/2 ›`），旧分支随时可以切回去。
 - **附件**：图片和文件（≤ 50 MB）可以直接拖进对话或粘贴，图片会以图片形式发给 Claude。附件点开就能在网页里阅读（见下文“文件阅读器”）。
+- **发送不卡顿**：点发送后消息立刻出现（标着“发送中”），输入框马上清空；发送失败时内容放回输入框并说明原因，可以直接重试。新对话的第一条消息和建对话合在一次请求里完成。
+- **回复进行中继续说话**：输入框旁有“补充 / 提问”切换。“补充”（默认）进入正在进行的任务，排队提示会写明 Claude 完成哪一步（已进行多久）后会看到；“提问”或 `/btw 问题` 是**旁路提问**：另起一个只读的 Claude 马上回答，带着当前对话和主任务已完成的进度，不打断主任务，也不写进它的上下文。回答单独显示为“旁路提问”卡片，需要时点“带入对话”放进输入框，作为下一条消息的背景。
+- **引用**：在回复（或你自己的消息）里选中一段文字，点浮出的“引用”，内容以 `> ` 引用格式追加到输入框，代码块里的内容保留为代码块；可以连续引用多段，不会覆盖已经输入的文字。手机上按钮显示在输入框上方，不挡系统的复制菜单。
 - **图文并茂**：回复里的 Markdown 图片 `![说明](地址)` 直接显示，Claude 可以一边讲一边配图，不用额外调用工具。地址可以是服务器上的绝对路径、相对工作目录的路径，或网络图片链接（由服务器代为加载，手机在国内也能看到海外图片）。几张图并排显示，点开全屏，可以左右切换。服务器上的图片在回复结束时自动存一份，之后原文件删了也照常显示。
 - **交付文件**：成品文件（报告、表格、压缩包……）Claude 用 `show_file` 作为附件卡片交给你，同样点开即读，也能下载。
 - Markdown（表格、任务列表、删除线等）、代码高亮和一键复制，深色模式，全文搜索，导出 Markdown，只读分享链接。
@@ -60,11 +63,11 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 | 类型 | 怎么显示 |
 |---|---|
 | PDF | 内置 pdf.js：中文正常显示，文字可以选中复制，缩放、页码，长文档按需渲染（手机不卡），带密码的 PDF 可以输入密码 |
-| Word（docx） | 标题、段落格式、编号和项目符号、表格（含合并单元格）、图片、链接 |
+| Word（docx） | 标题、段落格式、编号和项目符号、表格（含合并单元格）、图片、链接，“目录”按标题跳转 |
 | Excel（xlsx） | 多个工作表切换，合并单元格，日期、百分比、千分位等格式，行号列号 |
 | PowerPoint（pptx） | 逐页显示标题、文字层级、图片、表格和演讲者备注 |
 | CSV / TSV | 表格显示，自动识别 GBK 编码（Excel 导出的中文 CSV 不乱码） |
-| Markdown、代码、文本 | Markdown 排版（相对路径的图片也能显示，可切换源码），代码带行号，GBK 文本自动识别 |
+| Markdown、代码、文本 | Markdown 排版（相对路径的图片也能显示，可切换源码，“目录”按标题跳转），代码带行号，GBK 文本自动识别 |
 | Jupyter 笔记本 | Markdown 单元格、代码、文本输出和图表 |
 | 图片、音视频 | 图片可全屏，音视频可以拖动进度 |
 | HTML | 不运行脚本、不联网的安全预览，可切换源码 |
@@ -76,6 +79,8 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 - **项目**：侧边栏可以新建项目。每个项目对应服务器上的一个目录：默认新建 `<工作目录>/projects/<项目名>`，也可以指定已有目录。项目里的对话都以这个目录为工作目录运行 `claude -p`，所以共用其中的文件、项目级 `CLAUDE.md` 和 Claude Code 的记忆，不用每次重新交代背景。不用项目时一切照旧。
 - **文件面板**：右侧的“文件”面板（和浏览器面板切换）显示当前项目的目录树，点文件就用上面的阅读器打开。Claude 改完文件后面板自动刷新；回复里提到的文件路径可以点击打开。手机上全屏显示。
 - **终端面板**：右侧的“终端”里可以自己在项目目录下运行命令，输出实时显示，`cd` 会保留到下一条命令，命令需要输入时直接打字回车，随时可以停止（Ctrl+C）。Claude 在当前对话里运行过的每条命令也列在这里（标着“Claude”），点开能看完整命令和输出；回复里的“运行命令”也能一键跳过去。这里不是完整的终端模拟器（不能跑 vim、top 这类全屏程序），颜色和分页器都关掉了。
+- **远程机器（你自己的电脑）**：在“用量与设置 › 远程机器”里添加服务器上已经配置好的 SSH 别名（`~/.ssh/config` 里的 Host，比如通过 Tailscale 或反向隧道连到的家里电脑）和允许浏览的目录（如 `D:\Projects`、`/home/me/work`）。之后文件面板顶部可以在“云机”和这些目录之间切换，浏览、预览、下载和服务器上的文件一样；电脑关机或断网时直接显示“离线”，不会一直转圈。用的是系统自带的 `sftp`（复用连接），Windows OpenSSH 和 Linux 都能用；只读，不能修改或删除远程文件；MambaBot 不保存密码，也不生成或导出密钥。单个文件预览上限 20 MB（`AW_REMOTE_MAX_MB`），避免大文件堵住隧道。
+- **远程项目**：新建项目时“位置”可以选一台远程机器，用目录选择器逐级点选允许的文件夹（也可以直接填路径）。Claude 仍在服务器上运行（工作目录 `projects/<名称>` 放项目的 `CLAUDE.md` 和记忆），系统提示里自动写明“项目文件在哪台电脑的哪个目录、用 `ssh 别名` 操作、Windows 默认是 PowerShell/cmd”，不用每次重新交代。侧边栏显示项目所在的机器和离线状态，文件面板默认打开远程目录，回复里提到的远程路径（包括 `D:\…` 这样的 Windows 路径）可以直接点开。机器离线时发消息会先问你，确认仍然发送时 Claude 会被告知机器离线、不要反复重连。（`sshfs` 挂载暂不提供。）
 - 文件面板只读，不在网页里编辑。目录树只列项目目录内的文件，符号链接也不能跳出目录；`.env`、私钥、`.ssh`、`.git` 等不显示，也不能作为项目目录选中服务配置和数据目录。回复里提到的其他路径同样过一遍凭据黑名单（`~/.ssh`、`~/.claude`、服务配置和数据目录、浏览器配置、`/proc` 等）。
 
 ### 安全：每一步都在你眼皮底下
@@ -161,6 +166,7 @@ node src/server.js                # 默认监听 127.0.0.1:3400
 | `AW_DATA_DIR` / `AW_CONFIG_DIR` | `~/.local/share/assistant-web` / `~/.config/assistant-web` | 对话数据 / 登录凭据 |
 | `AW_BROWSER_BIN` / `AW_BROWSER_PROFILE` | — | 开启实时浏览器面板，需要 BrowserOS、Xvfb、x11vnc、noVNC，以及 `sudo -n iptables`（把 BrowserOS 的端口限制在本机） |
 | `AW_REMOTE_IMAGES_FAKE_IP` | `0` | 回复里的网络图片只从公网地址下载。服务器的 DNS 经过本机代理（TUN/fake-ip 模式，域名都解析到 198.18.x.x）时设成 `1` |
+| `AW_REMOTE_MAX_MB` | `20` | 远程机器上的文件，单个文件在网页里预览/下载的上限（MB），文件经过 SSH 隧道传到服务器 |
 | `TZ` | `serve.sh` 中为 `UTC` | 定时任务按服务器本地时间计算 |
 
 **多个 Claude 账号**：每个账号用一个单独的 Claude Code 配置目录登录，再让它和默认账号共用对话记录（会话按 id 续接，记忆也在这里）和 skills：
@@ -221,6 +227,9 @@ on your own server and with your own Claude Code login, built for phones as much
 Node.js process that starts `claude -p` (stream-json) for each reply. It includes:
 
 - model and effort picker, branching chats (edit/regenerate fork the CLI session), attachments, and Claude showing you files inline
+- instant sending (the message shows at once and comes back to the composer if sending fails; a new chat and its first message are one request), messages added to a running reply that say which step they wait for, and side questions (`/btw` or the 提问 toggle): a separate read-only Claude answers right away with the chat and the running task's progress as context, without interrupting the task or entering its context
+- quoting: select text in a reply and add it to the composer as a Markdown quote (code stays a code block)
+- remote machines: browse folders on your own computers (an SSH alias from the server's `~/.ssh/config`, read-only over `sftp`, offline shown as such), and projects whose files live on one of them (Claude is told where and how to reach them)
 - illustrated replies: Markdown images (`![](path or URL)`) render inline from host paths (saved when the reply ends) or the web (through an SSRF-safe server proxy), with a swipeable full-screen viewer
 - an in-page reader for PDF (bundled pdf.js), Word, Excel, PowerPoint (parsed on the server into plain data, no dependencies), CSV (GBK detected), Markdown, code, Jupyter notebooks, audio/video (range requests) and script-free HTML, for project files, attachments and any non-secret path a reply names
 - approval cards for every permission prompt, with four permission modes
