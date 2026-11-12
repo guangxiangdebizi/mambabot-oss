@@ -11,11 +11,11 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 每一步需要授权的操作都会先在网页上问你。配合 Tailscale / SSH，还能操作你家里和公司的电脑。
 
 <p align="center">
-  <img src="docs/screenshots/desktop-chat.png" alt="桌面端：Claude 用 headless Chrome 截了 Hacker News 首页，图片直接显示在回复里" width="860">
+  <img src="docs/screenshots/desktop-chat.png" alt="桌面端：Claude 在“行业研报”项目里把销量数据画成柱状图，图片直接显示在回复里" width="860">
 </p>
 
-> 截图都是真实运行的界面，用示例数据截取。上图中，Claude 在服务器上用 headless Chrome 截了一张网页，
-> 图片直接显示在回复里。
+> 截图都是 v0.6.0 真实运行的界面，用示例数据截取。上图中，Claude 在“行业研报”项目里把销量数据画成图，
+> 图片直接显示在回复里；左边是项目（“毕业设计”的文件在你自己的电脑上）和对话。
 
 - **零依赖**：一个 Node.js 进程，没有 npm 依赖，也没有构建步骤（PDF 阅读用的 pdf.js 直接随仓库附带）。
 - **用的就是你的 Claude Code**：每条回复启动一次官方原版的 `claude -p`，订阅登录和 API Key 都可以用，权限规则和 CLI 完全一致。MambaBot 不经手你的 Claude 登录凭据（见[账号与 Anthropic 条款](#账号与-anthropic-条款)）。
@@ -56,6 +56,18 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
   <img src="docs/screenshots/desktop-dark.png" alt="深色模式下的代码块" width="49%">
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/desktop-btw.png" alt="回复进行中：补充的消息写明在等哪一步，旁路提问马上得到回答，输入框旁切换“补充 / 提问”" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/mobile-sending.png" alt="点发送后消息立刻出现，标着“发送中”" width="24%">
+  <img src="docs/screenshots/mobile-quote.png" alt="选中回复里的文字，点“引用”加到输入框" width="24%">
+</p>
+
+> 上：主任务还在跑命令，补充的“再加一列环比”在排队并写明要等哪一步；旁路提问“现在在做哪一步”已经单独回答，输入框切到了“提问”。
+> 下：发送后消息立刻出现（发送中）；选中回复里的文字点“引用”，以引用格式加到输入框。
+
 ### 文件阅读器
 
 不用下载，文件直接在网页右侧（手机上全屏）打开阅读，桌面上还可以切换到全屏阅读：
@@ -81,6 +93,15 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 - **终端面板**：右侧的“终端”里可以自己在项目目录下运行命令，输出实时显示，`cd` 会保留到下一条命令，命令需要输入时直接打字回车，随时可以停止（Ctrl+C）。Claude 在当前对话里运行过的每条命令也列在这里（标着“Claude”），点开能看完整命令和输出；回复里的“运行命令”也能一键跳过去。这里不是完整的终端模拟器（不能跑 vim、top 这类全屏程序），颜色和分页器都关掉了。
 - **远程机器（你自己的电脑）**：在“用量与设置 › 远程机器”里添加服务器上已经配置好的 SSH 别名（`~/.ssh/config` 里的 Host，比如通过 Tailscale 或反向隧道连到的家里电脑）和允许浏览的目录（如 `D:\Projects`、`/home/me/work`）。之后文件面板顶部可以在“云机”和这些目录之间切换，浏览、预览、下载和服务器上的文件一样；电脑关机或断网时直接显示“离线”，不会一直转圈。用的是系统自带的 `sftp`（复用连接），Windows OpenSSH 和 Linux 都能用；只读，不能修改或删除远程文件；MambaBot 不保存密码，也不生成或导出密钥。单个文件预览上限 20 MB（`AW_REMOTE_MAX_MB`），避免大文件堵住隧道。
 - **远程项目**：新建项目时“位置”可以选一台远程机器，用目录选择器逐级点选允许的文件夹（也可以直接填路径）。Claude 仍在服务器上运行（工作目录 `projects/<名称>` 放项目的 `CLAUDE.md` 和记忆），系统提示里自动写明“项目文件在哪台电脑的哪个目录、用 `ssh 别名` 操作、Windows 默认是 PowerShell/cmd”，不用每次重新交代。侧边栏显示项目所在的机器和离线状态，文件面板默认打开远程目录，回复里提到的远程路径（包括 `D:\…` 这样的 Windows 路径）可以直接点开。机器离线时发消息会先问你，确认仍然发送时 Claude 会被告知机器离线、不要反复重连。（`sshfs` 挂载暂不提供。）
+<p align="center">
+  <img src="docs/screenshots/desktop-remote.png" alt="远程项目：文件面板打开“我的电脑”上的论文初稿，“目录”按标题跳转；回复里的 D:\ 路径可以点开" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/mobile-project.png" alt="新建项目时选择远程机器上的文件夹" width="24%">
+  <img src="docs/screenshots/mobile-machines.png" alt="设置里的远程机器，显示在线和离线" width="24%">
+</p>
+
 - 文件面板只读，不在网页里编辑。目录树只列项目目录内的文件，符号链接也不能跳出目录；`.env`、私钥、`.ssh`、`.git` 等不显示，也不能作为项目目录选中服务配置和数据目录。回复里提到的其他路径同样过一遍凭据黑名单（`~/.ssh`、`~/.claude`、服务配置和数据目录、浏览器配置、`/proc` 等）。
 
 ### 安全：每一步都在你眼皮底下
