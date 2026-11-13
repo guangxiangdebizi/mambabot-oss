@@ -9,6 +9,7 @@ import {
   LoginLimiter, SessionStore, checkHost, checkOrigin, ensureCredentials, readAuthRecord, verifyPassword,
 } from './auth.js';
 import { ConversationStore, ID_RE, pathTo, resumePlan } from './store.js';
+import { conversationWindow, messageView, sendConversationJson } from './conversation-view.js';
 import { PERMISSION_MODES, RunManager } from './runner.js';
 import { ModelCatalog } from './models.js';
 import { MAX_ATTACHMENTS, MAX_UPLOAD, UploadStore } from './uploads.js';
@@ -1187,16 +1188,38 @@ export async function createApp(cfg = loadConfig(), log = console) {
       return sendJson(res, 200, { shares: shares.list() });
     }
 
-    const m = path.match(/^\/api\/conversations\/([^/]+)(?:\/(messages|followups|regenerate|stop|events|approvals|share|status|btw)(?:\/([^/]+))?)?$/);
+    const m = path.match(/^\/api\/conversations\/([^/]+)(?:\/(messages|commands|followups|regenerate|stop|events|approvals|share|status|btw)(?:\/([^/]+))?)?$/);
     if (!m || !ID_RE.test(m[1])) throw new HttpError(404, '接口不存在');
     const conv = store.get(m[1]);
     if (!conv) throw new HttpError(404, '对话不存在');
     const [, , action, sub] = m;
 
     if (!action && method === 'GET') {
-      return sendJson(res, 200, {
-        conversation: { ...summary(conv, runs), messages: conv.messages, leafId: conv.leafId, run: runs.publicState(conv.id), btw: conv.btw || [] },
+      let view = { messages: conv.messages, leafId: conv.leafId, tips: conv.tips || {} };
+      if (url.searchParams.get('view') === 'window') {
+        try { view = conversationWindow(conv, url.searchParams); }
+        catch (err) { throw new HttpError(400, err.message); }
+      }
+      return sendConversationJson(req, res, {
+        conversation: { ...summary(conv, runs), ...view, run: runs.publicState(conv.id), btw: conv.btw || [] },
       });
+    }
+    if (action === 'commands' && method === 'GET') {
+      const commands = pathTo(conv, conv.leafId).flatMap((msg) => msg.parts
+        .filter((p) => p.type === 'tool' && p.name === 'Bash')
+        .map((p) => ({ id: p.id, messageId: msg.id, command: p.summary || '', desc: p.summary,
+          state: p.state, at: p.at || msg.createdAt, deferredDetail: Boolean(p.detail || p.output) })));
+      return sendConversationJson(req, res, { commands });
+    }
+    if (action === 'messages' && sub && method === 'GET') {
+      const msg = conv.messages.find((item) => item.id === sub);
+      if (!msg) throw new HttpError(404, '消息不存在');
+      if (url.searchParams.has('tool')) {
+        const part = msg.parts.find((p) => p.type === 'tool' && p.id === url.searchParams.get('tool'));
+        if (!part) throw new HttpError(404, '操作记录不存在');
+        return sendConversationJson(req, res, { part });
+      }
+      return sendConversationJson(req, res, { message: messageView(msg, { fullText: true }) });
     }
     if (!action && method === 'PATCH') return patchConversation(req, res, conv);
     if (action === 'regenerate' && method === 'POST') return regenerate(req, res, conv);
@@ -1332,6 +1355,13 @@ export async function createApp(cfg = loadConfig(), log = console) {
   }
 
   const server = http.createServer((req, res) => {
+    const started = performance.now();
+    if (req.method === 'GET' && /^\/api\/conversations\/[0-9a-f-]+(?:[/?]|$)/.test(req.url) && !req.url.includes('/events')) {
+      res.once('finish', () => log.info('conversation-read', JSON.stringify({
+        status: res.statusCode, ms: Math.round(performance.now() - started),
+        bytes: Number(res.getHeader('Content-Length')) || null,
+      })));
+    }
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     let url = null;
     const handle = async () => {

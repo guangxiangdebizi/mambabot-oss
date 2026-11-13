@@ -60,6 +60,7 @@ export function openTerminal() {
   ui.chip.setAttribute('aria-expanded', 'true');
   connect();
   renderFeed(true);
+  hooks.loadCommandIndex?.().catch((err) => { if (err.name !== 'AbortError' && err.status !== 401) hooks.toast(err.message); });
   if (!narrow.matches) ui.input.focus();
   else ui.back.focus();
 }
@@ -195,7 +196,7 @@ function items() {
   if (st.filter !== 'claude') out.push(...st.entries.map(mine));
   if (st.filter !== 'me') {
     for (const c of hooks.claudeCommands?.() || []) {
-      out.push({ id: c.id, who: 'claude', command: c.command, desc: c.desc, at: c.at, output: c.output, state: c.state });
+      out.push({ id: c.id, who: 'claude', command: c.command, desc: c.desc, at: c.at, output: c.output, state: c.state, deferredDetail: c.deferredDetail });
     }
   }
   return out.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
@@ -214,6 +215,16 @@ function isOpen(it) {
   return it.who === 'me';
 }
 
+const detailLoads = new Set();
+const detailErrors = new Map();
+function loadCommandDetail(id) {
+  if (detailLoads.has(id)) return;
+  detailLoads.add(id);
+  detailErrors.delete(id);
+  hooks.loadClaudeCommand(id).catch((err) => { detailErrors.set(id, err.name === 'AbortError' ? '加载已取消' : err.message); })
+    .finally(() => { detailLoads.delete(id); if (isTerminalOpen()) renderFeed(); });
+}
+
 function entryNode(it) {
   const open = isOpen(it);
   const box = el('div', `tm-entry who-${it.who} st-${it.state}`);
@@ -228,6 +239,15 @@ function entryNode(it) {
   if (it.who === 'claude' && it.desc && it.desc !== first) box.append(el('p', 'tm-desc', it.desc));
   if (!open) return box;
   const body = el('div', 'tm-body');
+  if (it.deferredDetail) {
+    body.append(el('p', 'tm-meta', detailErrors.get(it.id) || '加载命令详情…'));
+    if (detailErrors.has(it.id)) {
+      const retry = el('button', 'link-btn', '重试');
+      retry.type = 'button'; retry.addEventListener('click', () => loadCommandDetail(it.id)); body.append(retry);
+    } else loadCommandDetail(it.id);
+    box.append(body);
+    return box;
+  }
   if (it.who === 'me') body.append(el('p', 'tm-meta', `${shortPath(it.cwd)} · ${new Date(it.at).toLocaleTimeString('zh-CN', { hour12: false })}`));
   // The header shows the first line; the whole command only when there is more to it.
   if ((it.command || '').includes('\n') || (it.command || '').length > 80) body.append(el('pre', 'tm-full', it.command));

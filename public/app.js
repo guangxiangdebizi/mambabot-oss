@@ -18,6 +18,11 @@ import {
   exportMarkdown, initExtras, notify, openPlusMenu, openSettings, openShare, openStatus, openTasks,
 } from './extras.js';
 import { initResizers } from './resize.js';
+import { LatestRequest, mergeWindow } from './conversation-load.js';
+
+const conversationReads = new LatestRequest();
+const historyReads = new LatestRequest();
+let commandIndex = { convId: null, commands: [] };
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -116,25 +121,43 @@ class ApiError extends Error {
   constructor(message, status, data) { super(message); this.status = status; this.data = data; }
 }
 
-async function api(path, { method = 'GET', body, raw, headers = {} } = {}) {
+async function api(path, { method = 'GET', body, raw, headers = {}, signal } = {}) {
+  const timeout = method === 'GET' && path.startsWith('/api/conversations/') ? AbortSignal.timeout(30000) : null;
+  const fetchSignal = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
   let res;
   try {
     res = await fetch(path, {
       method,
+      signal: fetchSignal,
       credentials: 'same-origin',
       headers: raw ? headers : (body === undefined ? headers : { 'Content-Type': 'application/json', ...headers }),
       body: raw || (body === undefined ? undefined : JSON.stringify(body)),
     });
-  } catch {
+  } catch (err) {
+    if (timeout?.aborted && !signal?.aborted) throw new ApiError('加载超时，请重试', 0);
+    if (signal?.aborted || err.name === 'AbortError') throw err;
     throw new ApiError('无法连接服务器，请检查网络', 0);
   }
   let data = null;
-  try { data = await res.json(); } catch { /* empty body */ }
+  try { data = await res.json(); } catch (err) {
+    if (timeout?.aborted && !signal?.aborted) throw new ApiError('加载超时，请重试', 0);
+    if (signal?.aborted || err.name === 'AbortError') throw err;
+    if (res.ok) throw new ApiError('响应未完整接收，请重试', 0);
+  }
   if (res.status === 401 && path !== '/api/login') {
     showLogin();
     throw new ApiError('登录已失效，请重新登录', 401, data);
   }
   if (!res.ok) throw new ApiError(data?.error || `请求失败（${res.status}）`, res.status, data);
+  if (path.includes('view=window')) {
+    const timing = performance.getEntriesByName(new URL(path, location.href).href).at(-1);
+    if (timing) console.debug('conversation-network', {
+      queueAndConnectMs: Math.round(timing.requestStart - timing.fetchStart),
+      ttfbMs: Math.round(timing.responseStart - timing.requestStart),
+      downloadMs: Math.round(timing.responseEnd - timing.responseStart),
+      bytes: timing.encodedBodySize, serverTiming: res.headers.get('Server-Timing'),
+    });
+  }
   return data;
 }
 
@@ -212,6 +235,8 @@ function applyTheme(t) {
 /* ================= views ================= */
 
 function showLogin() {
+  conversationReads.cancel();
+  historyReads.cancel();
   closeStream();
   stopBrowserEvents();
   authed = false;
@@ -835,6 +860,10 @@ function canBranchFrom(parentId) {
 }
 
 function startDraft(projectId = null) {
+  conversationReads.cancel();
+  historyReads.cancel();
+  state.loading = false;
+  state.loadingEarlier = false;
   closeStream();
   state.conv = null;
   state.run = null;
@@ -850,20 +879,30 @@ function startDraft(projectId = null) {
 }
 
 async function openConversation(id) {
+  const request = conversationReads.begin();
+  historyReads.cancel();
+  state.loadingEarlier = false;
+  const started = performance.now();
+  state.historyFailed = false;
+  commandIndex = { convId: null, commands: [] };
   closeStream();
   imageNodes.clear();
   state.loading = true;
   state.editing = null;
   state.renderCount = MSG_PAGE;
   state.conv = { id, title: '', messages: [], leafId: null, settings: null };
+  state.run = null;
   render();
   try {
-    const { conversation } = await api(`/api/conversations/${id}`);
-    if (state.conv?.id !== id) return;
+    const { conversation } = await api(`/api/conversations/${id}?view=window`, { signal: request.signal });
+    if (!request.current() || state.conv?.id !== id) return;
     state.conv = conversation;
+    state.renderCount = conversation.window?.count || MSG_PAGE;
+    console.debug('conversation-load', { downloadAndParseMs: Math.round(performance.now() - started) });
     state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : null;
     history.replaceState(null, '', `#${id}`);
     pollRunningSide();
+    if (!$('term-panel').hidden) loadCommandIndex().catch((err) => { if (err.name !== 'AbortError' && err.status !== 401) toast(err.message); });
     if (conversation.projectId && !state.openProjects.has(conversation.projectId)) {
       state.openProjects.add(conversation.projectId);
       saveOpenProjects();
@@ -871,15 +910,19 @@ async function openConversation(id) {
     }
     if (conversation.run) openStream(conversation.run.id, conversation.run.seq);
   } catch (err) {
+    if (!request.current()) return;
     if (err.status === 401) return;
     state.conv = null;
     history.replaceState(null, '', location.pathname);
     showBanner(err.status === 404 ? '这个对话不存在或已被删除' : err.message, 'error');
   } finally {
+    if (!request.current()) return;
     state.loading = false;
+    const rendering = performance.now();
     render(true);
     renderList();
     updateModelChrome();
+    console.debug('conversation-load', { renderMs: Math.round(performance.now() - rendering), totalMs: Math.round(performance.now() - started) });
   }
 }
 
@@ -890,15 +933,25 @@ async function switchBranch(messageId, dir) {
   const i = sibs.findIndex((s) => s.id === messageId) + dir;
   if (i < 0 || i >= sibs.length) return;
   const leafId = deepestLeaf(sibs[i].id);
-  const prevLeaf = state.conv.leafId;
-  state.conv.leafId = leafId;
+  const conv = state.conv;
+  const request = conversationReads.begin();
+  historyReads.cancel();
+  state.loading = true;
+  state.loadingEarlier = false;
   render();
   try {
-    await api(`/api/conversations/${state.conv.id}`, { method: 'PATCH', body: { leafId } });
+    await api(`/api/conversations/${conv.id}`, { method: 'PATCH', body: { leafId } });
+    if (!request.current()) return;
+    const { conversation } = await api(`/api/conversations/${conv.id}?view=window&leaf=${leafId}`, { signal: request.signal });
+    if (!request.current()) return;
+    state.conv = conversation;
+    commandIndex = { convId: null, commands: [] };
+    state.renderCount = conversation.window?.count || MSG_PAGE;
   } catch (err) {
-    state.conv.leafId = prevLeaf;
-    render();
+    if (!request.current()) return;
     if (err.status !== 401) toast(err.message);
+  } finally {
+    if (request.current()) { state.loading = false; render(true); }
   }
 }
 
@@ -939,19 +992,22 @@ function openStream(runId, after) {
 }
 
 async function reloadCurrent() {
-  if (!state.conv) return;
+  if (!state.conv || state.loading) return;
+  const previous = state.conv;
+  const request = conversationReads.begin();
   try {
-    const { conversation } = await api(`/api/conversations/${state.conv.id}`);
-    if (state.conv?.id !== conversation.id) return;
-    state.conv = conversation;
-    state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : state.run;
+    const { conversation } = await api(`/api/conversations/${previous.id}?view=window`, { signal: request.signal });
+    if (!request.current() || state.conv?.id !== conversation.id) return;
+    state.conv = mergeWindow(state.conv, conversation);
+    state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : null;
     hideBanner();
     pollRunningSide();
     if (conversation.run) openStream(conversation.run.id, conversation.run.seq);
   } catch (err) {
+    if (!request.current()) return;
     if (err.status === 0) {
       showBanner('无法连接服务器，稍后自动重试…', 'warn');
-      setTimeout(reloadCurrent, 4000);
+      setTimeout(() => { if (request.current()) reloadCurrent(); }, 4000);
       return;
     }
     if (err.status !== 401) showBanner(err.message, 'error');
@@ -1072,15 +1128,57 @@ function updateChrome() {
 
 /** Commands Claude ran on the shown branch, for the terminal panel. */
 function claudeCommands() {
-  const out = [];
+  const out = new Map((commandIndex.convId === state.conv?.id ? commandIndex.commands : []).map((c) => [c.id, c]));
   for (const m of visiblePath()) {
     if (m.role !== 'assistant') continue;
     for (const p of m.parts) {
       if (p.type !== 'tool' || p.name !== 'Bash') continue;
-      out.push({ id: p.id, command: p.detail || p.summary || '', desc: p.summary, output: p.output, state: p.state, at: p.at || m.createdAt });
+      out.set(p.id, { id: p.id, messageId: m.id, command: p.detail || p.summary || '', desc: p.summary, output: p.output,
+        state: p.state, at: p.at || m.createdAt, deferredDetail: p.deferredDetail });
     }
   }
-  return out;
+  return [...out.values()];
+}
+
+async function loadCommandIndex() {
+  const conv = state.conv;
+  if (!conv?.id) return;
+  const { commands } = await api(`/api/conversations/${conv.id}/commands`, { signal: conversationReads.current?.signal });
+  if (state.conv?.id !== conv.id || state.conv.leafId !== conv.leafId) return;
+  commandIndex = { convId: conv.id, commands };
+  refreshTerminalClaude();
+}
+
+const toolLoads = new Map();
+async function loadToolDetail(messageId, toolId) {
+  const conv = state.conv;
+  const msg = conv?.messages.find((m) => m.id === messageId);
+  const cached = msg?.parts.find((p) => p.id === toolId);
+  if (cached && !cached.deferredDetail) return cached;
+  const key = `${conv?.id}:${messageId}:${toolId}`;
+  if (toolLoads.has(key)) return toolLoads.get(key);
+  const promise = (async () => {
+    const { part } = await api(`/api/conversations/${conv.id}/messages/${messageId}?tool=${encodeURIComponent(toolId)}`, { signal: conversationReads.current?.signal });
+    if (state.conv?.id !== conv.id) throw new DOMException('Conversation changed', 'AbortError');
+    const current = state.conv.messages.find((m) => m.id === messageId);
+    const index = current?.parts.findIndex((p) => p.id === toolId) ?? -1;
+    if (index >= 0) current.parts[index] = part;
+    const command = commandIndex.convId === conv.id && commandIndex.commands.find((c) => c.id === toolId);
+    if (command) Object.assign(command, { command: part.detail || part.summary || '', output: part.output, deferredDetail: false });
+    return part;
+  })();
+  toolLoads.set(key, promise);
+  try { return await promise; } finally { toolLoads.delete(key); }
+}
+
+async function loadFullText(msg) {
+  if (!msg?.deferredText) return msg;
+  const conv = state.conv;
+  const { message } = await api(`/api/conversations/${conv.id}/messages/${msg.id}`, { signal: conversationReads.current?.signal });
+  if (state.conv?.id !== conv.id) throw new DOMException('Conversation changed', 'AbortError');
+  const index = state.conv.messages.findIndex((m) => m.id === msg.id);
+  if (index >= 0) state.conv.messages[index] = message;
+  return message;
 }
 
 function pickFiles() {
@@ -1104,7 +1202,8 @@ function renderMessages() {
     box.append(emptyState('加载对话中…', ''));
     return;
   }
-  const path = visiblePath();
+  const fullPath = visiblePath();
+  const path = fullPath.filter((m) => !m.deferred);
   if (!state.conv || path.length === 0) {
     const project = currentProject();
     box.append(project
@@ -1120,9 +1219,11 @@ function renderMessages() {
   let start = Math.max(0, path.length - state.renderCount);
   if (editIdx >= 0 && editIdx < start) start = editIdx;
   earlierObserver.disconnect();
-  if (start > 0) {
-    const more = el('button', 'load-earlier', `显示更早的消息（还有 ${start} 条）`);
+  const remaining = fullPath.length - path.length + start;
+  if (remaining > 0) {
+    const more = el('button', 'load-earlier', state.loadingEarlier ? '加载更早的消息…' : `显示更早的消息（还有 ${remaining} 条）`);
     more.type = 'button';
+    more.disabled = state.loadingEarlier;
     more.addEventListener('click', loadEarlier);
     box.append(more);
     earlierObserver.observe(more);
@@ -1138,21 +1239,42 @@ function renderMessages() {
 }
 
 /** Renders one more page above, keeping what the reader is looking at in place. */
-function loadEarlier() {
-  if (state.loadingEarlier) return;
+async function loadEarlier() {
+  if (state.loadingEarlier || state.loading || !state.conv) return;
+  const conv = state.conv;
+  const request = historyReads.begin();
   state.loadingEarlier = true;
+  state.historyFailed = false;
+  const button = ui.messages.querySelector('.load-earlier');
+  if (button) { button.disabled = true; button.textContent = '加载更早的消息…'; }
   const s = ui.scroller;
   const fromBottom = s.scrollHeight - s.scrollTop;
-  state.renderCount += MSG_PAGE;
-  renderMessages();
-  s.scrollTop = s.scrollHeight - fromBottom;
-  requestAnimationFrame(() => { state.loadingEarlier = false; });
+  const loaded = visiblePath().filter((m) => !m.deferred);
+  try {
+    if (loaded.length <= state.renderCount && loaded[0]?.parentId) {
+      const { conversation } = await api(`/api/conversations/${conv.id}?view=window&leaf=${conv.leafId}&before=${loaded[0].id}`, { signal: request.signal });
+      if (!request.current() || state.conv?.id !== conv.id || state.conv.leafId !== conv.leafId) return;
+      state.conv = mergeWindow(state.conv, conversation);
+    }
+    state.renderCount += MSG_PAGE;
+  } catch (err) {
+    if (request.current() && err.name !== 'AbortError' && err.status !== 401) {
+      state.historyFailed = true;
+      toast(err.message);
+    }
+  } finally {
+    if (request.current() && state.conv?.id === conv.id) {
+      state.loadingEarlier = false;
+      renderMessages();
+      s.scrollTop = s.scrollHeight - fromBottom;
+    }
+  }
 }
 
 // Fires when the "earlier" button nears the top of the viewport, but not on the initial
 // render (which scrolls to the bottom), so opening a chat never cascades through history.
 const earlierObserver = new IntersectionObserver((entries) => {
-  if (entries.some((e) => e.isIntersecting) && !state.stick) loadEarlier();
+  if (entries.some((e) => e.isIntersecting) && !state.stick && !state.historyFailed) loadEarlier();
 }, { root: ui.scroller, rootMargin: '300px 0px 0px 0px' });
 
 function emptyState(title, hint) {
@@ -1429,7 +1551,7 @@ function fillAssistant(node, msg) {
   let tools = [];
   const flushTools = (running) => {
     if (!tools.length) return;
-    body.append(activityBlock(tools, running));
+    body.append(activityBlock(tools, running, msg.id));
     tools = [];
   };
   const live = msg.status === 'running' || msg.status === 'stopping';
@@ -1460,6 +1582,20 @@ function fillAssistant(node, msg) {
     }
   });
   flushTools(live);
+  if (msg.deferredText) {
+    const more = el('button', 'link-btn', '展开完整回复');
+    more.type = 'button';
+    more.addEventListener('click', async () => {
+      more.disabled = true;
+      more.textContent = '加载完整回复…';
+      try { const full = await loadFullText(msg); fillMessage(node, full); }
+      catch (err) {
+        if (err.name !== 'AbortError' && err.status !== 401) toast(err.message);
+        more.disabled = false; more.textContent = '展开完整回复';
+      }
+    });
+    body.append(more);
+  }
   for (const q of msg.queued || []) body.append(followupView(q, true, msg));
   node.append(body);
 
@@ -1571,7 +1707,7 @@ function handoffCard(part, msg) {
   return box;
 }
 
-function activityBlock(tools, running) {
+function activityBlock(tools, running, messageId) {
   const det = el('details', `activity${running ? ' running' : ''}`);
   const sum = el('summary');
   const last = tools[tools.length - 1];
@@ -1586,6 +1722,10 @@ function activityBlock(tools, running) {
   chev.classList.add('chev');
   sum.append(chev);
   det.append(sum);
+  let built = false;
+  const build = () => {
+  if (built) return;
+  built = true;
   const ul = el('ul', 'tool-list');
   for (const t of tools) {
     const li = el('li', `tool-li tool-${t.state}`);
@@ -1596,9 +1736,32 @@ function activityBlock(tools, running) {
     row.append(summaryNode);
     row.append(el('span', 'tool-state', { running: '进行中', done: '完成', error: '失败' }[t.state] || ''));
     li.append(row);
-    if (t.detail) li.append(el('pre', 'tool-detail', t.detail));
+    const details = el('details', 'tool-lazy-detail');
+    details.append(el('summary', '', '查看详情'));
+    const content = el('div');
+    details.append(content);
+    let loaded = false;
+    let loading = false;
+    const populate = async () => {
+      if (loaded || loading || !details.open) return;
+      loading = true;
+      content.textContent = '加载详情…';
+      try {
+        const part = t.deferredDetail ? await loadToolDetail(messageId, t.id) : t;
+        content.replaceChildren();
+        if (part.detail) content.append(el('pre', 'tool-detail', part.detail));
+        if (part.output) content.append(el('pre', 'tool-output', part.output.length > 2000 ? `${part.output.slice(0, 2000)}\n…` : part.output));
+        if (!part.detail && !part.output) content.append(el('p', '', '没有更多详情'));
+        loaded = true;
+      } catch (err) {
+        content.textContent = err.name === 'AbortError' ? '加载已取消' : '加载失败';
+        const retry = el('button', 'link-btn', '重试');
+        retry.type = 'button'; retry.addEventListener('click', populate); content.append(retry);
+      } finally { loading = false; }
+    };
+    details.addEventListener('toggle', populate);
+    li.append(details);
     if (t.name === 'Bash') {
-      if (t.output) li.append(el('pre', 'tool-output', t.output.length > 2000 ? `${t.output.slice(0, 2000)}\n…` : t.output));
       const open = el('button', 'link-btn tool-open', '在终端面板查看');
       open.type = 'button';
       open.dataset.tool = t.id;
@@ -1607,10 +1770,11 @@ function activityBlock(tools, running) {
     ul.append(li);
   }
   det.append(ul);
+  };
   det.dataset.key = tools[0].id;
-  if (openActivities.has(tools[0].id)) det.open = true;
+  if (openActivities.has(tools[0].id)) { det.open = true; build(); }
   det.addEventListener('toggle', () => {
-    if (det.open) openActivities.add(tools[0].id); else openActivities.delete(tools[0].id);
+    if (det.open) { openActivities.add(tools[0].id); build(); } else openActivities.delete(tools[0].id);
   });
   return det;
 }
@@ -2301,7 +2465,11 @@ initFiles({
 });
 initMachines({ api, toast, confirm: (title, text) => confirmDialog(title, text, '删除', true) });
 onMachinesChange(() => { if (authed) updateChrome(); });
-initTerminal({ api, toast, claudeCommands, closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); } });
+initTerminal({ api, toast, claudeCommands, loadCommandIndex,
+  loadClaudeCommand: (id) => {
+    const command = claudeCommands().find((c) => c.id === id);
+    return command ? loadToolDetail(command.messageId, id) : Promise.resolve();
+  }, closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); } });
 const PANELS = { files: openFiles, terminal: openTerminal, browser: openBrowser };
 for (const b of document.querySelectorAll('.panel-tab[data-panel]')) b.addEventListener('click', () => PANELS[b.dataset.panel]());
 initExtras({
@@ -2418,7 +2586,10 @@ ui.messages.addEventListener('click', (e) => {
   const { action, id } = btn.dataset;
   if (action === 'approve') decide(btn);
   else if (action === 'copy-code') copyCode(btn);
-  else if (action === 'copy-msg') copyText(textOf(byId().get(id)), btn);
+  else if (action === 'copy-msg') {
+    loadFullText(byId().get(id)).then((msg) => copyText(textOf(msg), btn))
+      .catch((err) => { if (err.name !== 'AbortError' && err.status !== 401) toast(err.message); });
+  }
   else if (action === 'edit') { state.editing = id; render(); }
   else if (action === 'regenerate') regenerate(id);
   else if (action === 'branch') switchBranch(id, Number(btn.dataset.dir));
