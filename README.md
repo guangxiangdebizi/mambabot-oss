@@ -44,8 +44,8 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
 - **模型与推理强度**：可选的模型直接来自 CLI 的 `initialize`（Opus、Sonnet、Haiku……），每个对话可以单独选模型和推理强度。如果运行时实际用的模型和你选的不一样，页面会明确提示。
 - **分支**：编辑任何一条消息、重新生成任何一条回复，都会从当时的上下文分叉成新分支（`‹ 1/2 ›`），旧分支随时可以切回去。
 - **附件**：图片和文件（≤ 50 MB）可以直接拖进对话或粘贴，图片会以图片形式发给 Claude。附件点开就能在网页里阅读（见下文“文件阅读器”）。
-- **发送不卡顿**：点发送后消息立刻出现（标着“发送中”），输入框马上清空；发送失败时内容放回输入框并说明原因，可以直接重试。新对话的第一条消息和建对话合在一次请求里完成。
-- **回复进行中继续说话**：输入框旁有“补充 / 提问”切换。“补充”（默认）进入正在进行的任务，排队提示会写明 Claude 完成哪一步（已进行多久）后会看到；“提问”或 `/btw 问题` 是**旁路提问**：另起一个只读的 Claude 马上回答，带着当前对话和主任务已完成的进度，不打断主任务，也不写进它的上下文。回答单独显示为“旁路提问”卡片，需要时点“带入对话”放进输入框，作为下一条消息的背景。
+- **发送不卡顿**：点发送后消息立刻出现（标着“发送中”），输入框马上清空；发送失败时内容放回输入框并说明原因，可以直接重试。新对话的第一条消息和建对话合在一次请求里完成。每个对话有自己的输入框：没发出去的文字、附件和“补充 / 提问”状态跟着对话走，切换对话不会串，刷新页面后文字还在。
+- **回复进行中继续说话**：输入框旁有“补充 / 提问”切换。“补充”（默认）进入正在进行的任务，排队提示会写明 Claude 完成哪一步（已进行多久）后会看到；“提问”或 `/btw 问题` 是**旁路提问**：另起一个只读的 Claude 马上回答，带着当前对话和主任务已完成的进度，不打断主任务，也不写进它的上下文。旁路问答显示在右侧单独的“提问”面板里（顶栏“提问”按钮，和文件、终端、浏览器同一个位置），不夹在主对话中间；面板有自己的输入框，可以随时接着问；面板收起时有新回答，按钮上会亮点提示。需要时点“带入对话”放进输入框，作为下一条消息的背景。
 - **引用**：在回复（或你自己的消息）里选中一段文字，点浮出的“引用”，内容以 `> ` 引用格式追加到输入框，代码块里的内容保留为代码块；可以连续引用多段，不会覆盖已经输入的文字。手机上按钮显示在输入框上方，不挡系统的复制菜单。
 - **图文并茂**：回复里的 Markdown 图片 `![说明](地址)` 直接显示，Claude 可以一边讲一边配图，不用额外调用工具。地址可以是服务器上的绝对路径、相对工作目录的路径，或网络图片链接（由服务器代为加载，手机在国内也能看到海外图片）。几张图并排显示，点开全屏，可以左右切换。服务器上的图片在回复结束时自动存一份，之后原文件删了也照常显示。
 - **交付文件**：成品文件（报告、表格、压缩包……）Claude 用 `show_file` 作为附件卡片交给你，同样点开即读，也能下载。
@@ -65,7 +65,7 @@ MambaBot 把同样的体验放到**你自己的服务器**上：一台云主机�
   <img src="docs/screenshots/mobile-quote.png" alt="选中回复里的文字，点“引用”加到输入框" width="24%">
 </p>
 
-> 上：主任务还在跑命令，补充的“再加一列环比”在排队并写明要等哪一步；旁路提问“现在在做哪一步”已经单独回答，输入框切到了“提问”。
+> 上：主任务还在跑命令，补充的“再加一列环比”在排队并写明要等哪一步；旁路提问“现在在做哪一步”已经单独回答（现在旁路问答显示在右侧“提问”面板里），输入框切到了“提问”。
 > 下：发送后消息立刻出现（发送中）；选中回复里的文字点“引用”，以引用格式加到输入框。
 
 ### 文件阅读器
@@ -248,7 +248,8 @@ on your own server and with your own Claude Code login, built for phones as much
 Node.js process that starts `claude -p` (stream-json) for each reply. It includes:
 
 - model and effort picker, branching chats (edit/regenerate fork the CLI session), attachments, and Claude showing you files inline
-- instant sending (the message shows at once and comes back to the composer if sending fails; a new chat and its first message are one request), messages added to a running reply that say which step they wait for, and side questions (`/btw` or the 提问 toggle): a separate read-only Claude answers right away with the chat and the running task's progress as context, without interrupting the task or entering its context
+- instant sending (the message shows at once and comes back to the composer if sending fails; a new chat and its first message are one request), messages added to a running reply that say which step they wait for, and side questions (`/btw`, the 提问 toggle or the 提问 panel): a separate read-only Claude answers right away with the chat and the running task's progress as context, without interrupting the task or entering its context; the answers live in their own right-hand panel, not in the transcript
+- one composer per chat: unsent text (kept across reloads), attachments and the 补充 / 提问 mode stay with their chat
 - quoting: select text in a reply and add it to the composer as a Markdown quote (code stays a code block)
 - remote machines: browse folders on your own computers (an SSH alias from the server's `~/.ssh/config`, read-only over `sftp`, offline shown as such), and projects whose files live on one of them (Claude is told where and how to reach them)
 - illustrated replies: Markdown images (`![](path or URL)`) render inline from host paths (saved when the reply ends) or the web (through an SSRF-safe server proxy), with a swipeable full-screen viewer

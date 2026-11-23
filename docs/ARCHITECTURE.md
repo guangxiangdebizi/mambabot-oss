@@ -102,16 +102,25 @@ How the pieces fit, for people changing the code. The [README](../README.md) cov
   `POST /api/conversations` with `message: { text, attachments }`, which validates everything
   (text, model, concurrency, remote machine) before the chat exists and starts the reply in the
   same request. Queued follow-ups name the step they wait for (the running tool and its age).
-- **Side questions** (`/btw`, `src/sidequestion.js`): while a reply runs the composer has a
-  补充 / 提问 toggle; 提问 or `/btw <question>` posts `POST /api/conversations/<id>/btw`. A separate
+  Each chat has its own composer (`public/drafts.js`): switching chats parks the text, attachments
+  and 补充/提问 mode under `c:<id>` (or `new:<project>` for the new-chat page) and shows the other
+  chat's; text is kept in `localStorage` (`aw.drafts`, newest 100), attachments only in memory (an
+  upload still finishing lands in its own chat's draft). A send that fails after the owner moved to
+  another chat goes back to its own chat's draft.
+- **Side questions** (`/btw`, `src/sidequestion.js`, `public/side.js`): the 提问 panel shares the
+  right-hand slot with files, terminal and browser and has its own input (its unsent text is kept per
+  chat in `aw.sideDrafts`); while a reply runs the composer also has a 补充 / 提问 toggle. 提问, the
+  panel or `/btw <question>` posts `POST /api/conversations/<id>/btw` and opens the panel. A separate
   `claude -p` resumes the chat as a throwaway fork of the last finished reply (`--fork-session
   --no-session-persistence`, nothing is written), with `--tools Read,Grep,Glob --permission-mode
   dontAsk --strict-mcp-config` (read-only, no MCP servers, any permission prompt denied), the
   lowest effort the model offers, and the running turn's progress (owner message, Claude's text,
   steps with the one in progress and its age, follow-ups) appended to the system prompt. One per
   chat, two at a time, 3-minute limit. The answer is stored in `conv.btw` (never a message, so
-  never in the main session or shares) and polled by the page (`GET …/btw/<id>`, text grows as it
-  streams); 带入对话 pastes the question and answer into the composer as a quote; `DELETE` removes one.
+  never in the main session or shares), shown only in the panel (never in the transcript) and polled
+  by the page (`GET …/btw/<id>`, text grows as it streams; an answer that arrives while the panel is
+  closed lights a dot on its top-bar chip); 带入对话 pastes the question and answer into the composer
+  as a quote; `DELETE` removes one.
 - **Quoting**: selecting text in a message shows 引用 (by the selection with a mouse, above the
   composer on touch screens); it appends the selection to the composer as `> ` lines, or as a
   fenced block when it lies in a code block. Front end only.

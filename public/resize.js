@@ -74,8 +74,8 @@ function setup({ handle, target, cssVar, key, min, cap = Infinity, otherWidth, g
 
 export function initResizers() {
   const sidebar = document.getElementById('sidebar');
-  // The browser, file and terminal panels share one slot (and width) on the right.
-  const panels = ['browser-panel', 'files-panel', 'term-panel'].map((id) => document.getElementById(id));
+  // The browser, file, terminal and side-question panels share one slot (and width) on the right.
+  const panels = ['browser-panel', 'files-panel', 'term-panel', 'side-panel'].map((id) => document.getElementById(id));
   const panel = { get hidden() { return panels.every((p) => p.hidden); }, getBoundingClientRect: () => (panels.find((p) => !p.hidden) || panels[0]).getBoundingClientRect() };
   const visibleWidth = (node) => (node.hidden || (node instanceof Element && getComputedStyle(node).visibility === 'hidden') ? 0 : node.getBoundingClientRect().width);
   const sb = setup({

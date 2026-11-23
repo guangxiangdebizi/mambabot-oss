@@ -19,6 +19,8 @@ import {
 } from './extras.js';
 import { initResizers } from './resize.js';
 import { LatestRequest, mergeWindow } from './conversation-load.js';
+import { closeSide, initSide, askSide, openSide, syncSide } from './side.js';
+import { Drafts } from './drafts.js';
 
 const conversationReads = new LatestRequest();
 const historyReads = new LatestRequest();
@@ -111,6 +113,8 @@ const state = {
   askMode: 'add', // while a reply runs: 'add' joins the running turn, 'ask' is a side question (/btw)
 };
 const MSG_PAGE = 30;
+// Each chat has its own composer: unsent text, attachments and 补充/提问 mode stay with it.
+const drafts = new Drafts('aw.drafts');
 
 const store = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -207,7 +211,7 @@ const browserHooks = {
   isAuthed: () => authed,
   currentConvId: () => state.conv?.id || null,
   confirm: (title, text, ok = '接管') => confirmDialog(title, text, ok, false),
-  onOpen: () => { closeFiles({ focus: false }); closeTerminal({ focus: false }); },
+  onOpen: () => { closeFiles({ focus: false }); closeTerminal({ focus: false }); closeSide({ focus: false }); },
   onHelp(help) {
     announce(`助理需要你在浏览器中操作：${help.reason}`);
     if (help.convId !== state.conv?.id) {
@@ -816,6 +820,7 @@ async function removeConversation(id, title) {
   try {
     await api(`/api/conversations/${id}`, { method: 'DELETE' });
     if (state.conv?.id === id) startDraft(state.conv.projectId || null);
+    drafts.delete(`c:${id}`);
     await refreshList();
     toast('已删除');
   } catch (err) {
@@ -865,12 +870,14 @@ function startDraft(projectId = null) {
   state.loading = false;
   state.loadingEarlier = false;
   closeStream();
+  saveComposer();
   state.conv = null;
   state.run = null;
   state.editing = null;
   state.draftSel = null;
   state.draftProject = projectId;
   state.renderCount = MSG_PAGE;
+  loadComposer();
   history.replaceState(null, '', location.pathname);
   render(true);
   renderList();
@@ -890,8 +897,10 @@ async function openConversation(id) {
   state.loading = true;
   state.editing = null;
   state.renderCount = MSG_PAGE;
+  saveComposer();
   state.conv = { id, title: '', messages: [], leafId: null, settings: null };
   state.run = null;
+  loadComposer();
   render();
   try {
     const { conversation } = await api(`/api/conversations/${id}?view=window`, { signal: request.signal });
@@ -901,7 +910,6 @@ async function openConversation(id) {
     console.debug('conversation-load', { downloadAndParseMs: Math.round(performance.now() - started) });
     state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : null;
     history.replaceState(null, '', `#${id}`);
-    pollRunningSide();
     if (!$('term-panel').hidden) loadCommandIndex().catch((err) => { if (err.name !== 'AbortError' && err.status !== 401) toast(err.message); });
     if (conversation.projectId && !state.openProjects.has(conversation.projectId)) {
       state.openProjects.add(conversation.projectId);
@@ -912,7 +920,9 @@ async function openConversation(id) {
   } catch (err) {
     if (!request.current()) return;
     if (err.status === 401) return;
+    saveComposer();
     state.conv = null;
+    loadComposer();
     history.replaceState(null, '', location.pathname);
     showBanner(err.status === 404 ? '这个对话不存在或已被删除' : err.message, 'error');
   } finally {
@@ -1001,7 +1011,6 @@ async function reloadCurrent() {
     state.conv = mergeWindow(state.conv, conversation);
     state.run = conversation.run ? { id: conversation.run.id, messageId: conversation.run.messageId } : null;
     hideBanner();
-    pollRunningSide();
     if (conversation.run) openStream(conversation.run.id, conversation.run.seq);
   } catch (err) {
     if (!request.current()) return;
@@ -1084,6 +1093,7 @@ function render(toBottom = false) {
   renderMessages();
   updateChrome();
   refreshTerminalClaude();
+  syncSide();
   if (toBottom || state.stick) scrollToBottom();
   else if (keep !== null) ui.scroller.scrollTop = keep;
 }
@@ -1104,7 +1114,7 @@ function updateChrome() {
   const asking = live && state.askMode === 'ask';
   ui.askMode.hidden = !live;
   for (const b of ui.askMode.querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.mode === state.askMode));
-  if (live) ui.input.placeholder = asking ? '提问：马上由旁路回答，不打断当前任务' : '补充要求：Claude 完成当前步骤后会看到';
+  if (live) ui.input.placeholder = asking ? '提问：在右侧“提问”面板马上回答，不打断当前任务' : '补充要求：Claude 完成当前步骤后会看到';
   ui.send.setAttribute('aria-label', asking ? '旁路提问' : (live ? '追加到当前任务' : '发送'));
   const stopping = runMessage()?.status === 'stopping';
   ui.stop.disabled = stopping;
@@ -1194,6 +1204,40 @@ function setComposer(text) {
   ui.input.dispatchEvent(new Event('input'));
 }
 
+/* ---------- one composer per chat ---------- */
+
+/** The draft slot of a chat, or of the new-chat page of a project (or of no project). */
+const draftKey = (conv) => (conv?.id ? `c:${conv.id}` : `new:${(conv ? conv.projectId : state.draftProject) || ''}`);
+const composerKey = () => draftKey(state.conv);
+let composerLoaded = false; // until the first chat is shown, the empty composer is no one's draft
+
+/** Keeps what is in the composer under `key` (the shown chat by default) before switching away. */
+function saveComposer(key = composerKey()) {
+  if (!composerLoaded) return;
+  const extra = state.attachments.length || state.askMode !== 'add'
+    ? { attachments: state.attachments, askMode: state.askMode } : null;
+  drafts.set(key, ui.input.value, extra);
+}
+
+/** Shows the shown chat's own draft (empty for a chat without one). */
+function loadComposer() {
+  composerLoaded = true;
+  const d = drafts.get(composerKey());
+  ui.input.value = d?.text || '';
+  state.attachments = d?.attachments || [];
+  state.askMode = d?.askMode || 'add';
+  setError(ui.composerError, '');
+  renderAttachments();
+  autosize();
+}
+
+/** A failed send whose chat is no longer shown: its text goes back to that chat's draft. */
+function stashDraft(conv, text, attachments = []) {
+  const key = draftKey(conv);
+  if (drafts.get(key)) { for (const a of attachments) if (a.url) URL.revokeObjectURL(a.url); return; }
+  drafts.set(key, text, attachments.length ? { attachments, askMode: 'add' } : null);
+}
+
 function renderMessages() {
   const box = ui.messages;
   const focusKey = document.activeElement?.dataset?.focusKey;
@@ -1233,7 +1277,6 @@ function renderMessages() {
     node.dataset.id = msg.id;
     fillMessage(node, msg);
     box.append(node);
-    for (const b of state.conv.btw || []) if (b.anchorId === msg.id) box.append(btwCard(b));
   }
   if (focusKey) box.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
 }
@@ -1663,7 +1706,7 @@ function followupView(part, queued = false, msg = null) {
   if (part.text) box.append(el('div', 'bubble', part.text));
   if (queued) {
     const note = el('div', 'followup-note', queuedNote(part, msg));
-    if (!part.sending) note.title = '想马上得到回答、又不打断任务，可以在输入框旁切到“提问”，或发送 /btw 问题';
+    if (!part.sending) note.title = '想马上得到回答、又不打断任务，可以在右上角“提问”面板里问，或发送 /btw 问题';
     box.append(note);
   }
   if (part.undelivered) {
@@ -1910,6 +1953,11 @@ async function send(extra = {}) {
     const question = btw ? (btw[1] || '').trim() : text;
     if (!question) { setError(ui.composerError, '用法：/btw 你的问题'); return; }
     if (ready.length) { setError(ui.composerError, '旁路提问不能带附件'); return; }
+    if (!state.conv?.id || !visiblePath().length) { setError(ui.composerError, '先发一条消息，再旁路提问'); return; }
+    // Answered in the 提问 panel, never in the transcript; the composer is free again.
+    ui.input.value = '';
+    saveComposer();
+    autosize();
     askSide(question);
     return;
   }
@@ -1934,6 +1982,7 @@ async function send(extra = {}) {
   conv.leafId = temp.id;
   ui.input.value = '';
   state.attachments = [];
+  drafts.delete(draftKey(conv));
   renderAttachments();
   autosize();
   render(true);
@@ -1961,7 +2010,7 @@ async function send(extra = {}) {
   } catch (err) {
     conv.messages = conv.messages.filter((m) => m !== temp);
     conv.leafId = prevLeaf;
-    if (state.conv !== conv) return;
+    if (state.conv !== conv) { stashDraft(conv, saved.text, saved.attachments); return; }
     if (draft) state.conv = null;
     const restored = restoreComposer(saved.text, saved.attachments);
     render();
@@ -1988,6 +2037,7 @@ async function sendFollowup(text, ready) {
   if (msg) { msg.queued = [...(msg.queued || []), temp]; scheduleMessageRender(msg); }
   ui.input.value = '';
   state.attachments = [];
+  drafts.delete(draftKey(conv));
   renderAttachments();
   autosize();
   state.sending = true;
@@ -2007,7 +2057,7 @@ async function sendFollowup(text, ready) {
   } catch (err) {
     const m = conv.messages.find((x) => x.id === msgId);
     if (m) m.queued = (m.queued || []).filter((q) => q !== temp);
-    if (state.conv !== conv) return;
+    if (state.conv !== conv) { stashDraft(conv, saved.text, saved.attachments); return; }
     if (m) scheduleMessageRender(m);
     const restored = restoreComposer(saved.text, saved.attachments);
     if (err.status !== 401) setError(ui.composerError, `${err.message}${restored ? '（内容已放回输入框）' : ''}`);
@@ -2015,113 +2065,6 @@ async function sendFollowup(text, ready) {
     state.sending = false;
     updateChrome();
   }
-}
-
-/* ---------- side questions (/btw) ---------- */
-
-const sidePolls = new Map();
-
-/** Asks a side question: answered right away by a separate read-only session. */
-async function askSide(question) {
-  const conv = state.conv;
-  if (!conv?.id || !visiblePath().length) { setError(ui.composerError, '先发一条消息，再旁路提问'); return; }
-  const anchorId = isLive() ? state.run.messageId : conv.leafId;
-  const temp = { id: localId(), question, answer: '', status: 'running', anchorId, createdAt: new Date().toISOString() };
-  conv.btw = [...(conv.btw || []), temp];
-  const savedText = ui.input.value;
-  ui.input.value = '';
-  autosize();
-  render();
-  try {
-    const { btw } = await api(`/api/conversations/${conv.id}/btw`, { method: 'POST', body: { text: question } });
-    if (state.conv?.id !== conv.id) return;
-    state.conv.btw = (state.conv.btw || []).filter((b) => b !== temp && b.id !== btw.id).concat(btw);
-    render();
-    pollSide(btw.id);
-  } catch (err) {
-    conv.btw = (conv.btw || []).filter((b) => b !== temp);
-    if (state.conv !== conv) return;
-    render();
-    const restored = restoreComposer(savedText);
-    if (err.status !== 401) setError(ui.composerError, `${err.message}${restored ? '（问题已放回输入框）' : ''}`);
-  }
-}
-
-function pollRunningSide() {
-  for (const b of state.conv?.btw || []) if (b.status === 'running' && !b.id.startsWith('local-')) pollSide(b.id);
-}
-
-/** Follows one side question until it is answered (the answer text grows as it streams). */
-function pollSide(id) {
-  if (sidePolls.has(id)) return;
-  const convId = state.conv.id;
-  const stop = () => { clearTimeout(sidePolls.get(id)); sidePolls.delete(id); };
-  const tick = async () => {
-    if (state.conv?.id !== convId) { stop(); return; }
-    try {
-      const { btw } = await api(`/api/conversations/${convId}/btw/${id}`);
-      const list = state.conv?.id === convId ? state.conv.btw || [] : [];
-      const i = list.findIndex((b) => b.id === id);
-      if (i < 0) { stop(); return; }
-      const changed = list[i].answer !== btw.answer || list[i].status !== btw.status;
-      list[i] = btw;
-      if (changed) updateBtw(btw);
-      if (btw.status !== 'running') {
-        stop();
-        if (btw.status === 'done') announce('旁路提问已回答');
-        return;
-      }
-    } catch (err) {
-      if (err.status === 404 || err.status === 401) { stop(); return; }
-    }
-    sidePolls.set(id, setTimeout(tick, 900));
-  };
-  sidePolls.set(id, setTimeout(tick, 500));
-}
-
-function updateBtw(b) {
-  const node = ui.messages.querySelector(`[data-btw="${CSS.escape(b.id)}"]`);
-  if (!node) return;
-  node.replaceWith(btwCard(b));
-  if (state.stick) scrollToBottom();
-}
-
-function btwCard(b) {
-  const box = el('section', `btw btw-${b.status}`);
-  box.dataset.btw = b.id;
-  box.setAttribute('aria-label', '旁路提问');
-  const head = el('div', 'btw-head');
-  head.append(icon('question', 16), el('span', 'btw-label', '旁路提问'), el('span', 'btw-sub', '不打断主任务，也不进入对话上下文'));
-  const actions = el('span', 'btw-actions');
-  if (b.status === 'done' && b.answer) {
-    const bring = el('button', 'link-btn', '带入对话');
-    bring.type = 'button';
-    bring.dataset.action = 'btw-bring';
-    bring.dataset.id = b.id;
-    bring.title = '把这条问答放进输入框，作为下一条消息的背景';
-    actions.append(bring);
-  }
-  if (!b.id.startsWith('local-')) {
-    const x = iconButton('x', '删除这条旁路问答', 'icon-btn btw-x');
-    x.dataset.action = 'btw-remove';
-    x.dataset.id = b.id;
-    actions.append(x);
-  }
-  head.append(actions);
-  box.append(head, el('div', 'btw-q', b.question));
-  const ans = el('div', 'btw-a');
-  if (b.answer) {
-    const md = el('div', 'md');
-    md.append(renderMarkdown(b.answer, document, { highlight: (code, lang) => highlight(document, code, lang) }));
-    ans.append(md);
-  }
-  if (b.status === 'running') {
-    const wait = el('p', 'btw-wait');
-    wait.append(thinkingDots(), el('span', '', b.answer ? '' : '正在回答…'));
-    ans.append(wait);
-  } else if (b.status === 'error') ans.append(el('p', 'btw-error', `没有回答：${b.error || '未知错误'}`));
-  box.append(ans);
-  return box;
 }
 
 const quoteLines = (text) => text.split('\n').map((l) => (l.trim() ? `> ${l}` : '>')).join('\n');
@@ -2138,21 +2081,9 @@ function appendToComposer(block) {
   ui.input.dispatchEvent(new Event('input'));
 }
 
-function bringBtw(id) {
-  const b = (state.conv?.btw || []).find((x) => x.id === id);
-  if (!b) return;
+/** A side answer, pasted into the composer as background for the next message. */
+function bringBtw(b) {
   appendToComposer(`（以下是刚才的一条旁路问答，供参考）\n${quoteLines(`问：${b.question}`)}\n>\n${quoteLines(`答：${b.answer}`)}`);
-}
-
-async function removeBtw(id) {
-  const conv = state.conv;
-  try {
-    await api(`/api/conversations/${conv.id}/btw/${id}`, { method: 'DELETE' });
-  } catch (err) {
-    if (err.status !== 404) { if (err.status !== 401) toast(err.message); return; }
-  }
-  conv.btw = (conv.btw || []).filter((b) => b.id !== id);
-  if (state.conv === conv) render();
 }
 
 /* ---------- quoting a selection ---------- */
@@ -2314,15 +2245,18 @@ function addFiles(files) {
   renderAttachments();
 }
 
+/** Still wanted: in the composer, or parked in another chat's draft while it uploads. */
+const attachmentKept = (a) => state.attachments.includes(a) || drafts.allExtras().some((d) => d.attachments?.includes(a));
+
 async function upload(a) {
   try {
     const { attachment } = await api('/api/uploads', {
       method: 'POST', raw: a.file, headers: { 'Content-Type': a.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(a.name) },
     });
-    if (!state.attachments.includes(a)) return;
+    if (!attachmentKept(a)) return;
     Object.assign(a, { status: 'ready', id: attachment.id, image: attachment.image });
   } catch (err) {
-    if (!state.attachments.includes(a)) return;
+    if (!attachmentKept(a)) return;
     a.status = 'error';
     a.error = err.status === 413 ? '文件过大' : err.message;
   }
@@ -2431,7 +2365,13 @@ ui.loginForm.addEventListener('submit', async (e) => {
 
 ui.composer.addEventListener('submit', (e) => { e.preventDefault(); send(); });
 ui.composer.addEventListener('click', (e) => { if (e.target === ui.composer) ui.input.focus(); });
-ui.input.addEventListener('input', autosize);
+let draftTimer = null;
+ui.input.addEventListener('input', () => {
+  autosize();
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => saveComposer(), 400);
+});
+window.addEventListener('pagehide', () => { if (authed) saveComposer(); });
 ui.input.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229 || coarse.matches) return;
   e.preventDefault();
@@ -2461,7 +2401,7 @@ $('open-settings').addEventListener('click', () => { if (narrow.matches) setDraw
 $('perm-chip').addEventListener('click', () => openSettings());
 initResizers();
 initFiles({
-  api, toast, openViewer, mdImage: readerImage, machines, closeOthers: () => { closeBrowser({ focus: false }); closeTerminal({ focus: false }); },
+  api, toast, openViewer, mdImage: readerImage, machines, closeOthers: () => { closeBrowser({ focus: false }); closeTerminal({ focus: false }); closeSide({ focus: false }); },
 });
 initMachines({ api, toast, confirm: (title, text) => confirmDialog(title, text, '删除', true) });
 onMachinesChange(() => { if (authed) updateChrome(); });
@@ -2469,11 +2409,17 @@ initTerminal({ api, toast, claudeCommands, loadCommandIndex,
   loadClaudeCommand: (id) => {
     const command = claudeCommands().find((c) => c.id === id);
     return command ? loadToolDetail(command.messageId, id) : Promise.resolve();
-  }, closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); } });
-const PANELS = { files: openFiles, terminal: openTerminal, browser: openBrowser };
+  }, closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); closeSide({ focus: false }); } });
+initSide({
+  api, toast, announce, bring: bringBtw,
+  conv: () => state.conv,
+  blockedReason: () => (!state.conv?.id || !visiblePath().length ? '先在对话里发一条消息，再旁路提问' : ''),
+  closeOthers: () => { closeBrowser({ focus: false }); closeFiles({ focus: false }); closeTerminal({ focus: false }); },
+});
+const PANELS = { files: openFiles, terminal: openTerminal, browser: openBrowser, side: openSide };
 for (const b of document.querySelectorAll('.panel-tab[data-panel]')) b.addEventListener('click', () => PANELS[b.dataset.panel]());
 initExtras({
-  api, toast, openMenu, newChat: () => newChat(currentProject()?.id || null), openModelPop, openBrowser, openFiles, openTerminal, pickFiles, setComposer, sendCommand,
+  api, toast, openMenu, newChat: () => newChat(currentProject()?.id || null), openModelPop, openBrowser, openFiles, openTerminal, openSide, pickFiles, setComposer, sendCommand,
   input: () => ui.input,
   currentConv: () => (state.conv?.id ? { id: state.conv.id, live: isLive() } : null),
   models: () => state.models,
@@ -2595,8 +2541,6 @@ ui.messages.addEventListener('click', (e) => {
   else if (action === 'branch') switchBranch(id, Number(btn.dataset.dir));
   else if (action === 'open-browser') openBrowser();
   else if (action === 'refill') setComposer(btn.dataset.text || '');
-  else if (action === 'btw-bring') bringBtw(id);
-  else if (action === 'btw-remove') removeBtw(id);
 });
 ui.messages.addEventListener('keydown', (e) => {
   const pathLink = e.key === 'Enter' && e.target.closest('.path-link');
